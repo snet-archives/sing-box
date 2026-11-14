@@ -200,7 +200,7 @@ require (
 )
 
 replace (
-	github.com/sagernet/sing-mux => github.com/snet-archives/sing-mux v0.3.10-0.20261114005530-51146103601d
-	github.com/sagernet/sing-quic => github.com/snet-archives/sing-quic v0.7.2-0.20261114005520-c0d6bdaf1694
-	github.com/sagernet/sing-vmess => github.com/snet-archives/sing-vmess v0.2.9-0.20261114005538-21e3b8717323
+	github.com/sagernet/sing-mux => github.com/snet-archives/sing-mux v0.3.10-0.20261114125634-6d6e9cb0485f
+	github.com/sagernet/sing-quic => github.com/snet-archives/sing-quic v0.7.2-0.20261114125649-32cc8fd0d5eb
+	github.com/sagernet/sing-vmess => github.com/snet-archives/sing-vmess v0.2.9-0.20261114125701-428cbba65c3a
 )
