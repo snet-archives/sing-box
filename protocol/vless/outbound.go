@@ -48,6 +48,17 @@ type Outbound struct {
 }
 
 func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSOutboundOptions) (adapter.Outbound, error) {
+	if options.Flow != "" {
+		if options.TLS == nil || !options.TLS.Enabled {
+			return nil, E.New("flow requires TLS to be enabled")
+		}
+		if common.PtrValueOrDefault(options.Multiplex).Enabled {
+			return nil, E.New("flow is incompatible with multiplex")
+		}
+		if options.Transport != nil && options.Transport.Type != "" {
+			return nil, E.New("flow is incompatible with custom transport: ", options.Transport.Type)
+		}
+	}
 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
 	if err != nil {
 		return nil, err

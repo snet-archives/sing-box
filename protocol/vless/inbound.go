@@ -54,6 +54,20 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		logger:  logger,
 		users:   options.Users,
 	}
+	hasVision := common.Any(options.Users, func(it option.VLESSUser) bool {
+		return it.Flow != ""
+	})
+	if hasVision {
+		if options.TLS == nil || !options.TLS.Enabled {
+			return nil, E.New("flow requires TLS to be enabled")
+		}
+		if common.PtrValueOrDefault(options.Multiplex).Enabled {
+			return nil, E.New("flow is incompatible with multiplex")
+		}
+		if options.Transport != nil && options.Transport.Type != "" {
+			return nil, E.New("flow is incompatible with custom transport: ", options.Transport.Type)
+		}
+	}
 	var err error
 	inbound.router, err = mux.NewRouterWithOptions(inbound.router, logger, common.PtrValueOrDefault(options.Multiplex))
 	if err != nil {

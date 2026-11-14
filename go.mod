@@ -198,3 +198,9 @@ require (
 	lukechampine.com/blake3 v1.3.0 // indirect
 	zombiezen.com/go/capnproto2 v2.18.2+incompatible // indirect
 )
+
+replace (
+	github.com/sagernet/sing-quic => ../sing-box-sublibs/sing-quic
+	github.com/sagernet/sing-mux => ../sing-box-sublibs/sing-mux
+	github.com/sagernet/sing-vmess => ../sing-box-sublibs/sing-vmess
+)
