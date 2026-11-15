@@ -74,7 +74,8 @@ func ServeConn(ctx context.Context, handler http.Handler, conn net.Conn, onClose
 			onClose(nil)
 		}
 	}()
-	if tlsConn, isTLS := common.Cast[aTLS.Conn](conn); isTLS && tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
+	tlsConn, isTLS := common.Cast[aTLS.Conn](conn)
+	if isTLS && tlsConn.ConnectionState().NegotiatedProtocol == "h2" {
 		(&http2.Server{}).ServeConn(conn, &http2.ServeConnOpts{
 			Context: ctx,
 			Handler: handler,
@@ -89,6 +90,9 @@ func ServeConn(ctx context.Context, handler http.Handler, conn net.Conn, onClose
 			return ctx
 		},
 	}
+	// Plain-TCP fallbacks come from reverse proxies whose HTTP/1.1 upstream pool
+	// would otherwise keep reusing this masquerade socket for later client requests.
+	server.SetKeepAlivesEnabled(isTLS)
 	_ = server.Serve(ln)
 }
 
