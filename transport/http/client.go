@@ -157,6 +157,7 @@ func NewClient(options ClientOptions) (*Client, error) {
 		if err != nil {
 			return nil, err
 		}
+		http2Transport.Fingerprint = tls.HTTP2FingerprintForSources(client.headers, "", options.TLSConfig, dialer)
 		http2Transport.DisableCompression = true
 		client.http2Transport = http2Transport
 	} else if client.version == 2 && options.DisableVersionFallback {

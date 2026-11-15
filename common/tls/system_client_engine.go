@@ -57,6 +57,10 @@ func (c *systemTLSConfig) STDConfig() (*STDConfig, error) {
 	return nil, E.New("STDConfig is unsupported for the system TLS engine")
 }
 
+func (c *systemTLSConfig) SupportsQUIC() bool {
+	return false
+}
+
 func (c *systemTLSConfig) Client(conn net.Conn) (Conn, error) {
 	return nil, os.ErrInvalid
 }

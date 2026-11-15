@@ -42,6 +42,7 @@ type Listener struct {
 	tcpListener          net.Listener
 	systemProxy          settings.SystemProxy
 	udpConn              *net.UDPConn
+	udpMaskConn          net.PacketConn
 	udpAddr              M.Socksaddr
 	packetOutbound       chan *N.PacketBuffer
 	packetOutboundClosed chan struct{}
@@ -140,9 +141,13 @@ func (l *Listener) Close() error {
 		}
 		err = E.Errors(err, l.systemProxy.Close())
 	}
+	var udpCloser any = l.udpMaskConn
+	if udpCloser == nil {
+		udpCloser = common.PtrOrNil(l.udpConn)
+	}
 	return E.Errors(err, common.Close(
 		l.tcpListener,
-		common.PtrOrNil(l.udpConn),
+		udpCloser,
 	))
 }
 

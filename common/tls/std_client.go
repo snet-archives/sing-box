@@ -10,10 +10,10 @@ import (
 	"net"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
@@ -25,14 +25,20 @@ import (
 
 type STDClientConfig struct {
 	ctx                   context.Context
+	access                sync.RWMutex
 	config                *tls.Config
 	serverName            string
 	disableSNI            bool
 	verifyServerName      bool
+	pinnedVerify          func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
 	handshakeTimeout      time.Duration
 	fragment              bool
 	fragmentFallbackDelay time.Duration
 	recordFragment        bool
+	fragmentMinLen        int
+	fragmentMaxLen        int
+	fragmentMinWait       time.Duration
+	fragmentMaxWait       time.Duration
 	spoof                 string
 	spoofMethod           tlsspoof.Method
 }
@@ -42,17 +48,22 @@ func (c *STDClientConfig) ServerName() string {
 }
 
 func (c *STDClientConfig) SetServerName(serverName string) {
+	c.access.Lock()
+	defer c.access.Unlock()
 	c.serverName = serverName
 	if c.disableSNI {
 		c.config.ServerName = ""
-		if c.verifyServerName {
-			c.config.VerifyConnection = verifyConnection(c.config.RootCAs, c.config.Time, serverName)
+		if c.pinnedVerify != nil {
+			c.config.VerifyPeerCertificate = c.pinnedVerify
+		} else if c.verifyServerName {
+			c.config.VerifyPeerCertificate = verifyPeerCertificate(c.config.RootCAs, c.config.Time, serverName)
 		} else {
-			c.config.VerifyConnection = nil
+			c.config.VerifyPeerCertificate = nil
 		}
 		return
 	}
 	c.config.ServerName = serverName
+	c.config.VerifyPeerCertificate = c.pinnedVerify
 }
 
 func (c *STDClientConfig) NextProtos() []string {
@@ -76,27 +87,44 @@ func (c *STDClientConfig) STDConfig() (*STDConfig, error) {
 }
 
 func (c *STDClientConfig) Client(conn net.Conn) (Conn, error) {
-	if c.fragment || c.recordFragment {
-		conn = tf.NewConn(conn, c.ctx, c.fragment, c.recordFragment, c.fragmentFallbackDelay)
-	}
+	conn = tlsFragmentOptions{
+		enabled:       c.fragment,
+		record:        c.recordFragment,
+		fallbackDelay: c.fragmentFallbackDelay,
+		minLen:        c.fragmentMinLen,
+		maxLen:        c.fragmentMaxLen,
+		minWait:       c.fragmentMinWait,
+		maxWait:       c.fragmentMaxWait,
+	}.wrap(c.ctx, conn)
 	conn, err := applyTLSSpoof(conn, c.spoof, c.spoofMethod)
 	if err != nil {
 		return nil, err
 	}
-	return tls.Client(conn, c.config), nil
+	c.access.RLock()
+	config := c.config.Clone()
+	c.access.RUnlock()
+	return &stdConnWrapper{Conn: tls.Client(conn, config)}, nil
 }
 
 func (c *STDClientConfig) Clone() Config {
+	c.access.RLock()
+	config := c.config.Clone()
+	c.access.RUnlock()
 	cloned := &STDClientConfig{
 		ctx:                   c.ctx,
-		config:                c.config.Clone(),
+		config:                config,
 		serverName:            c.serverName,
 		disableSNI:            c.disableSNI,
 		verifyServerName:      c.verifyServerName,
+		pinnedVerify:          c.pinnedVerify,
 		handshakeTimeout:      c.handshakeTimeout,
 		fragment:              c.fragment,
 		fragmentFallbackDelay: c.fragmentFallbackDelay,
 		recordFragment:        c.recordFragment,
+		fragmentMinLen:        c.fragmentMinLen,
+		fragmentMaxLen:        c.fragmentMaxLen,
+		fragmentMinWait:       c.fragmentMinWait,
+		fragmentMaxWait:       c.fragmentMaxWait,
 		spoof:                 c.spoof,
 		spoofMethod:           c.spoofMethod,
 	}
@@ -105,10 +133,14 @@ func (c *STDClientConfig) Clone() Config {
 }
 
 func (c *STDClientConfig) ECHConfigList() []byte {
+	c.access.RLock()
+	defer c.access.RUnlock()
 	return c.config.EncryptedClientHelloConfigList
 }
 
 func (c *STDClientConfig) SetECHConfigList(EncryptedClientHelloConfigList []byte) {
+	c.access.Lock()
+	defer c.access.Unlock()
 	c.config.EncryptedClientHelloConfigList = EncryptedClientHelloConfigList
 }
 
@@ -135,14 +167,16 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 	} else if options.DisableSNI {
 		tlsConfig.InsecureSkipVerify = true
 	}
+	var pinnedVerify func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error
 	if len(options.CertificateSHA256) > 0 || len(options.CertificatePublicKeySHA256) > 0 {
 		if len(options.Certificate) > 0 || options.CertificatePath != "" {
 			return nil, E.New("certificate_sha256 or certificate_public_key_sha256 is conflict with certificate or certificate_path")
 		}
 		tlsConfig.InsecureSkipVerify = true
-		tlsConfig.VerifyPeerCertificate = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+		pinnedVerify = func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 			return VerifyPinnedCertificate(options.CertificateSHA256, options.CertificatePublicKeySHA256, rawCerts)
 		}
+		tlsConfig.VerifyPeerCertificate = pinnedVerify
 	}
 	if len(options.ALPN) > 0 {
 		tlsConfig.NextProtos = options.ALPN
@@ -232,16 +266,25 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 	if err != nil {
 		return nil, err
 	}
+	fragOpts, err := parseTLSFragmentOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	var config Config = &STDClientConfig{
 		ctx:                   ctx,
 		config:                &tlsConfig,
 		serverName:            serverName,
 		disableSNI:            options.DisableSNI,
 		verifyServerName:      options.DisableSNI && !options.Insecure,
+		pinnedVerify:          pinnedVerify,
 		handshakeTimeout:      handshakeTimeout,
-		fragment:              options.Fragment,
-		fragmentFallbackDelay: time.Duration(options.FragmentFallbackDelay),
-		recordFragment:        options.RecordFragment,
+		fragment:              fragOpts.enabled,
+		fragmentFallbackDelay: fragOpts.fallbackDelay,
+		recordFragment:        fragOpts.record,
+		fragmentMinLen:        fragOpts.minLen,
+		fragmentMaxLen:        fragOpts.maxLen,
+		fragmentMinWait:       fragOpts.minWait,
+		fragmentMaxWait:       fragOpts.maxWait,
 		spoof:                 spoof,
 		spoofMethod:           spoofMethod,
 	}
@@ -267,12 +310,23 @@ func newSTDClient(ctx context.Context, logger logger.ContextLogger, serverAddres
 	return config, nil
 }
 
-func verifyConnection(rootCAs *x509.CertPool, timeFunc func() time.Time, serverName string) func(state tls.ConnectionState) error {
-	return func(state tls.ConnectionState) error {
+func verifyPeerCertificate(rootCAs *x509.CertPool, timeFunc func() time.Time, serverName string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	return func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
 		if serverName == "" {
 			return errMissingServerName
 		}
-		return verifySystemTLSPeer(rootCAs, serverName, timeFunc, state.PeerCertificates)
+		if len(rawCerts) == 0 {
+			return E.New("no peer certificates")
+		}
+		peerCertificates := make([]*x509.Certificate, 0, len(rawCerts))
+		for _, rawCert := range rawCerts {
+			cert, err := x509.ParseCertificate(rawCert)
+			if err != nil {
+				return E.Cause(err, "parse peer certificate")
+			}
+			peerCertificates = append(peerCertificates, cert)
+		}
+		return verifySystemTLSPeer(rootCAs, serverName, timeFunc, peerCertificates)
 	}
 }
 

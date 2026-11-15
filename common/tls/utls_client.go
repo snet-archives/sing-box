@@ -8,11 +8,12 @@ import (
 	"crypto/x509"
 	"math/rand"
 	"net"
+	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
-	"github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
@@ -26,8 +27,23 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// HasUTLS reports whether this build includes uTLS support.
+const HasUTLS = true
+
+// EnableUTLSIfAvailable enables uTLS with fingerprint when built with uTLS support.
+func EnableUTLSIfAvailable(options *option.OutboundTLSOptions, fingerprint string) {
+	if options == nil || options.UTLS != nil || fingerprint == "" {
+		return
+	}
+	options.UTLS = &option.OutboundUTLSOptions{
+		Enabled:     true,
+		Fingerprint: fingerprint,
+	}
+}
+
 type UTLSClientConfig struct {
 	ctx                   context.Context
+	access                sync.RWMutex
 	config                *utls.Config
 	serverName            string
 	disableSNI            bool
@@ -37,15 +53,23 @@ type UTLSClientConfig struct {
 	fragment              bool
 	fragmentFallbackDelay time.Duration
 	recordFragment        bool
+	fragmentMinLen        int
+	fragmentMaxLen        int
+	fragmentMinWait       time.Duration
+	fragmentMaxWait       time.Duration
 	spoof                 string
 	spoofMethod           tlsspoof.Method
 }
 
 func (c *UTLSClientConfig) ServerName() string {
+	c.access.RLock()
+	defer c.access.RUnlock()
 	return c.serverName
 }
 
 func (c *UTLSClientConfig) SetServerName(serverName string) {
+	c.access.Lock()
+	defer c.access.Unlock()
 	c.serverName = serverName
 	if c.disableSNI {
 		c.config.ServerName = ""
@@ -60,21 +84,29 @@ func (c *UTLSClientConfig) SetServerName(serverName string) {
 }
 
 func (c *UTLSClientConfig) NextProtos() []string {
-	return c.config.NextProtos
+	c.access.RLock()
+	defer c.access.RUnlock()
+	return slices.Clone(c.config.NextProtos)
 }
 
 func (c *UTLSClientConfig) SetNextProtos(nextProto []string) {
 	if len(nextProto) == 1 && nextProto[0] == http2.NextProtoTLS {
 		nextProto = append(nextProto, "http/1.1")
 	}
+	c.access.Lock()
+	defer c.access.Unlock()
 	c.config.NextProtos = nextProto
 }
 
 func (c *UTLSClientConfig) HandshakeTimeout() time.Duration {
+	c.access.RLock()
+	defer c.access.RUnlock()
 	return c.handshakeTimeout
 }
 
 func (c *UTLSClientConfig) SetHandshakeTimeout(timeout time.Duration) {
+	c.access.Lock()
+	defer c.access.Unlock()
 	c.handshakeTimeout = timeout
 }
 
@@ -82,25 +114,95 @@ func (c *UTLSClientConfig) STDConfig() (*STDConfig, error) {
 	return nil, E.New("unsupported usage for uTLS")
 }
 
-func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
-	if c.fragment || c.recordFragment {
-		conn = tf.NewConn(conn, c.ctx, c.fragment, c.recordFragment, c.fragmentFallbackDelay)
+// STDConfigForQUIC converts uTLS configuration parameters into a standard
+// *tls.Config compatible with quic-go and ChromeParrot.
+func (c *UTLSClientConfig) STDConfigForQUIC() (*STDConfig, error) {
+	c.access.RLock()
+	uCfg := c.config
+	serverName := c.serverName
+	disableSNI := c.disableSNI
+	verifyServerName := c.verifyServerName
+	c.access.RUnlock()
+
+	stdCfg := &tls.Config{
+		RootCAs:                        uCfg.RootCAs,
+		Time:                           uCfg.Time,
+		NextProtos:                     slices.Clone(uCfg.NextProtos),
+		ServerName:                     uCfg.ServerName,
+		InsecureSkipVerify:             uCfg.InsecureSkipVerify,
+		VerifyPeerCertificate:          uCfg.VerifyPeerCertificate,
+		MinVersion:                     uCfg.MinVersion,
+		MaxVersion:                     uCfg.MaxVersion,
+		CipherSuites:                   slices.Clone(uCfg.CipherSuites),
+		EncryptedClientHelloConfigList: slices.Clone(uCfg.EncryptedClientHelloConfigList),
 	}
+	for _, cert := range uCfg.Certificates {
+		stdCfg.Certificates = append(stdCfg.Certificates, tls.Certificate{
+			Certificate:                 cert.Certificate,
+			PrivateKey:                  cert.PrivateKey,
+			OCSPStaple:                  cert.OCSPStaple,
+			SignedCertificateTimestamps: cert.SignedCertificateTimestamps,
+			Leaf:                        cert.Leaf,
+		})
+	}
+	if disableSNI {
+		stdCfg.ServerName = ""
+		if stdCfg.VerifyPeerCertificate == nil {
+			stdCfg.InsecureSkipVerify = true
+			if verifyServerName {
+				stdCfg.VerifyPeerCertificate = verifyPeerCertificate(stdCfg.RootCAs, stdCfg.Time, serverName)
+			}
+		}
+	} else {
+		stdCfg.ServerName = serverName
+	}
+	return stdCfg, nil
+}
+
+func (c *UTLSClientConfig) UTLSFingerprint() (string, string, bool) {
+	c.access.RLock()
+	id := c.id
+	c.access.RUnlock()
+	if id.Client == "" || strings.EqualFold(id.Client, "Golang") {
+		return "", "", false
+	}
+	return id.Client, id.Version, true
+}
+
+func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
+	conn = tlsFragmentOptions{
+		enabled:       c.fragment,
+		record:        c.recordFragment,
+		fallbackDelay: c.fragmentFallbackDelay,
+		minLen:        c.fragmentMinLen,
+		maxLen:        c.fragmentMaxLen,
+		minWait:       c.fragmentMinWait,
+		maxWait:       c.fragmentMaxWait,
+	}.wrap(c.ctx, conn)
 	conn, err := applyTLSSpoof(conn, c.spoof, c.spoofMethod)
 	if err != nil {
 		return nil, err
 	}
-	return &utlsALPNWrapper{utlsConnWrapper{utls.UClient(conn, c.config.Clone(), c.id)}, c.config.NextProtos}, nil
+	c.access.RLock()
+	config := c.config.Clone()
+	id := c.id
+	c.access.RUnlock()
+	return &utlsALPNWrapper{utlsConnWrapper: utlsConnWrapper{UConn: utls.UClient(conn, config, id)}, nextProtocols: config.NextProtos}, nil
 }
 
 func (c *UTLSClientConfig) SetSessionIDGenerator(generator func(clientHello []byte, sessionID []byte) error) {
+	c.access.Lock()
+	defer c.access.Unlock()
 	c.config.SessionIDGenerator = generator
 }
 
 func (c *UTLSClientConfig) Clone() Config {
+	c.access.RLock()
+	config := c.config.Clone()
+	c.access.RUnlock()
 	cloned := &UTLSClientConfig{
 		ctx:                   c.ctx,
-		config:                c.config.Clone(),
+		config:                config,
 		serverName:            c.serverName,
 		disableSNI:            c.disableSNI,
 		verifyServerName:      c.verifyServerName,
@@ -109,6 +211,10 @@ func (c *UTLSClientConfig) Clone() Config {
 		fragment:              c.fragment,
 		fragmentFallbackDelay: c.fragmentFallbackDelay,
 		recordFragment:        c.recordFragment,
+		fragmentMinLen:        c.fragmentMinLen,
+		fragmentMaxLen:        c.fragmentMaxLen,
+		fragmentMinWait:       c.fragmentMinWait,
+		fragmentMaxWait:       c.fragmentMaxWait,
 		spoof:                 c.spoof,
 		spoofMethod:           c.spoofMethod,
 	}
@@ -117,15 +223,28 @@ func (c *UTLSClientConfig) Clone() Config {
 }
 
 func (c *UTLSClientConfig) ECHConfigList() []byte {
+	c.access.RLock()
+	defer c.access.RUnlock()
 	return c.config.EncryptedClientHelloConfigList
 }
 
 func (c *UTLSClientConfig) SetECHConfigList(EncryptedClientHelloConfigList []byte) {
+	c.access.Lock()
+	defer c.access.Unlock()
 	c.config.EncryptedClientHelloConfigList = EncryptedClientHelloConfigList
 }
 
 type utlsConnWrapper struct {
 	*utls.UConn
+	closeNotifySuppressor
+}
+
+func (c *utlsConnWrapper) Close() error {
+	return c.closeConn(c.UConn, c.UConn.NetConn())
+}
+
+func (c *utlsConnWrapper) CloseWrite() error {
+	return c.closeWriteConn(c.UConn, c.UConn.NetConn())
 }
 
 func (c *utlsConnWrapper) ConnectionState() tls.ConnectionState {
@@ -303,6 +422,10 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 	if err != nil {
 		return nil, err
 	}
+	fragOpts, err := parseTLSFragmentOptions(options)
+	if err != nil {
+		return nil, err
+	}
 	id, err := uTLSClientHelloID(options.UTLS.Fingerprint)
 	if err != nil {
 		return nil, err
@@ -315,9 +438,13 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 		verifyServerName:      options.DisableSNI && !options.Insecure,
 		handshakeTimeout:      handshakeTimeout,
 		id:                    id,
-		fragment:              options.Fragment,
-		fragmentFallbackDelay: time.Duration(options.FragmentFallbackDelay),
-		recordFragment:        options.RecordFragment,
+		fragment:              fragOpts.enabled,
+		fragmentFallbackDelay: fragOpts.fallbackDelay,
+		recordFragment:        fragOpts.record,
+		fragmentMinLen:        fragOpts.minLen,
+		fragmentMaxLen:        fragOpts.maxLen,
+		fragmentMinWait:       fragOpts.minWait,
+		fragmentMaxWait:       fragOpts.maxWait,
 		spoof:                 spoof,
 		spoofMethod:           spoofMethod,
 	}
@@ -346,8 +473,9 @@ func newUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddre
 }
 
 var (
-	randomFingerprint     utls.ClientHelloID
-	randomizedFingerprint utls.ClientHelloID
+	randomFingerprint           utls.ClientHelloID
+	randomizedFingerprint       utls.ClientHelloID
+	randomizedNoALPNFingerprint utls.ClientHelloID
 )
 
 func init() {
@@ -366,20 +494,46 @@ func init() {
 	randomizedFingerprint = utls.HelloRandomized
 	randomizedFingerprint.Seed, _ = utls.NewPRNGSeed()
 	randomizedFingerprint.Weights = &weights
+
+	randomizedNoALPNFingerprint = utls.HelloRandomizedNoALPN
+	randomizedNoALPNFingerprint.Seed, _ = utls.NewPRNGSeed()
+	randomizedNoALPNFingerprint.Weights = &weights
 }
 
 func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
 	switch name {
-	case "chrome_psk", "chrome_psk_shuffle", "chrome_padding_psk_shuffle", "chrome_pq", "chrome_pq_psk":
-		fallthrough
 	case "chrome", "":
 		return utls.HelloChrome_Auto, nil
+	case "chrome_133":
+		return utls.HelloChrome_133, nil
+	case "chrome_131":
+		return utls.HelloChrome_131, nil
+	case "chrome_120":
+		return utls.HelloChrome_120, nil
+	case "chrome_pq":
+		return utls.HelloChrome_120_PQ, nil
+	case "chrome_pq_psk":
+		return utls.HelloChrome_115_PQ_PSK, nil
+	case "chrome_psk":
+		return utls.HelloChrome_100_PSK, nil
+	case "chrome_psk_shuffle":
+		return utls.HelloChrome_112_PSK_Shuf, nil
+	case "chrome_padding_psk_shuffle":
+		return utls.HelloChrome_114_Padding_PSK_Shuf, nil
 	case "firefox":
 		return utls.HelloFirefox_Auto, nil
+	case "firefox_120":
+		return utls.HelloFirefox_120, nil
+	case "firefox_148":
+		return utls.HelloFirefox_148, nil
 	case "edge":
 		return utls.HelloEdge_Auto, nil
 	case "safari":
 		return utls.HelloSafari_Auto, nil
+	case "safari_16_0":
+		return utls.HelloSafari_16_0, nil
+	case "safari_26_3":
+		return utls.HelloSafari_26_3, nil
 	case "360":
 		return utls.Hello360_Auto, nil
 	case "qq":
@@ -392,6 +546,8 @@ func uTLSClientHelloID(name string) (utls.ClientHelloID, error) {
 		return randomFingerprint, nil
 	case "randomized":
 		return randomizedFingerprint, nil
+	case "randomized_no_alpn":
+		return randomizedNoALPNFingerprint, nil
 	default:
 		return utls.ClientHelloID{}, E.New("unknown uTLS fingerprint: ", name)
 	}

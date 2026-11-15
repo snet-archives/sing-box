@@ -3,6 +3,7 @@
 package tls
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/base64"
@@ -11,6 +12,7 @@ import (
 	"net"
 	"time"
 
+	"github.com/cloudflare/circl/sign/mldsa/mldsa65"
 	"github.com/sagernet/sing-box/common/dialer"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -101,6 +103,33 @@ func NewRealityServer(ctx context.Context, logger log.ContextLogger, options opt
 		return nil, E.New("invalid private key")
 	}
 	tlsConfig.PrivateKey = privateKey
+	if options.Reality.MLDSA65Seed != "" {
+		mldsa65Seed, err := base64.RawURLEncoding.DecodeString(options.Reality.MLDSA65Seed)
+		if err != nil {
+			return nil, E.Cause(err, "decode mldsa65_seed")
+		}
+		if len(mldsa65Seed) != mldsa65.SeedSize {
+			return nil, E.New("invalid mldsa65_seed")
+		}
+		if bytes.Equal(mldsa65Seed, privateKey) {
+			return nil, E.New("mldsa65_seed must not equal private_key")
+		}
+		tlsConfig.Mldsa65Seed = mldsa65Seed
+	}
+	if options.Reality.LimitFallbackUpload != nil {
+		tlsConfig.LimitFallbackUpload = utls.RealityLimitFallback{
+			AfterBytes:       options.Reality.LimitFallbackUpload.AfterBytes,
+			BytesPerSec:      options.Reality.LimitFallbackUpload.BytesPerSec,
+			BurstBytesPerSec: options.Reality.LimitFallbackUpload.BurstBytesPerSec,
+		}
+	}
+	if options.Reality.LimitFallbackDownload != nil {
+		tlsConfig.LimitFallbackDownload = utls.RealityLimitFallback{
+			AfterBytes:       options.Reality.LimitFallbackDownload.AfterBytes,
+			BytesPerSec:      options.Reality.LimitFallbackDownload.BytesPerSec,
+			BurstBytesPerSec: options.Reality.LimitFallbackDownload.BurstBytesPerSec,
+		}
+	}
 	tlsConfig.MaxTimeDiff = time.Duration(options.Reality.MaxTimeDifference)
 
 	tlsConfig.ShortIds = make(map[[8]byte]bool)
@@ -183,6 +212,10 @@ func (c *RealityServerConfig) STDConfig() (*tls.Config, error) {
 	return nil, E.New("unsupported usage for reality")
 }
 
+func (c *RealityServerConfig) SupportsQUIC() bool {
+	return false
+}
+
 func (c *RealityServerConfig) Client(conn net.Conn) (Conn, error) {
 	return ClientHandshake(context.Background(), conn, c)
 }
@@ -200,6 +233,11 @@ func (c *RealityServerConfig) Server(conn net.Conn) (Conn, error) {
 }
 
 func (c *RealityServerConfig) ServerHandshake(ctx context.Context, conn net.Conn) (Conn, error) {
+	if c.handshakeTimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.handshakeTimeout)
+		defer cancel()
+	}
 	tlsConn, err := utls.RealityServer(ctx, conn, c.config)
 	if err != nil {
 		return nil, err
@@ -218,6 +256,11 @@ var _ Conn = (*realityConnWrapper)(nil)
 
 type realityConnWrapper struct {
 	*utls.Conn
+	closeNotifySuppressor
+}
+
+func (c *realityConnWrapper) Close() error {
+	return c.closeConn(c.Conn, c.Conn.NetConn())
 }
 
 func (c *realityConnWrapper) ConnectionState() ConnectionState {
@@ -246,6 +289,9 @@ func (c *realityConnWrapper) Upstream() any {
 // Due to low implementation quality, the reality server intercepted half close and caused memory leaks.
 // We fixed it by calling Close() directly.
 func (c *realityConnWrapper) CloseWrite() error {
+	if c.suppressed.Load() {
+		return N.CloseWrite(c.Conn.NetConn())
+	}
 	return c.Close()
 }
 

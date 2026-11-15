@@ -7,8 +7,10 @@ import (
 	"net"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/sagernet/sing-box/common/badtls"
+	tf "github.com/sagernet/sing-box/common/tlsfragment"
 	"github.com/sagernet/sing-box/common/tlsspoof"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/option"
@@ -43,6 +45,57 @@ func applyTLSSpoof(conn net.Conn, spoof string, method tlsspoof.Method) (net.Con
 		return conn, nil
 	}
 	return tlsspoof.NewConn(conn, method, spoof)
+}
+
+type tlsFragmentOptions struct {
+	enabled       bool
+	record        bool
+	fallbackDelay time.Duration
+	minLen        int
+	maxLen        int
+	minWait       time.Duration
+	maxWait       time.Duration
+}
+
+func parseTLSFragmentOptions(options option.OutboundTLSOptions) (tlsFragmentOptions, error) {
+	result := tlsFragmentOptions{
+		enabled:       options.Fragment,
+		record:        options.RecordFragment,
+		fallbackDelay: time.Duration(options.FragmentFallbackDelay),
+	}
+	if options.FragmentLength != "" {
+		minLen, maxLen, err := tf.ParseRange(options.FragmentLength)
+		if err != nil {
+			return tlsFragmentOptions{}, E.Cause(err, "parse fragment_length")
+		}
+		result.minLen = minLen
+		result.maxLen = maxLen
+	}
+	if options.FragmentInterval != "" {
+		minWait, maxWait, err := tf.ParseDurationOrMillisRange(options.FragmentInterval)
+		if err != nil {
+			return tlsFragmentOptions{}, E.Cause(err, "parse fragment_interval")
+		}
+		result.minWait = minWait
+		result.maxWait = maxWait
+	}
+	return result, nil
+}
+
+func (f tlsFragmentOptions) wrap(ctx context.Context, conn net.Conn) net.Conn {
+	if !f.enabled && !f.record {
+		return conn
+	}
+	return tf.NewConnWithOptions(conn, tf.Options{
+		Context:         ctx,
+		SplitPacket:     f.enabled,
+		SplitRecord:     f.record,
+		FallbackDelay:   f.fallbackDelay,
+		FragmentMinLen:  f.minLen,
+		FragmentMaxLen:  f.maxLen,
+		FragmentMinWait: f.minWait,
+		FragmentMaxWait: f.maxWait,
+	})
 }
 
 func NewDialerFromOptions(ctx context.Context, logger logger.ContextLogger, dialer N.Dialer, serverAddress string, options option.OutboundTLSOptions) (N.Dialer, error) {
@@ -169,6 +222,10 @@ func (d *defaultDialer) dialContext(ctx context.Context, destination M.Socksaddr
 		return nil, err
 	}
 	return tlsConn, nil
+}
+
+func (d *defaultDialer) UTLSFingerprint() (string, string, bool) {
+	return UTLSFingerprint(d.config)
 }
 
 func (d *defaultDialer) Upstream() any {

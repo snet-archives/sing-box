@@ -179,7 +179,7 @@ func (c *STDServerConfig) Client(conn net.Conn) (Conn, error) {
 }
 
 func (c *STDServerConfig) Server(conn net.Conn) (Conn, error) {
-	return tls.Server(conn, c.config), nil
+	return &stdConnWrapper{Conn: tls.Server(conn, c.config)}, nil
 }
 
 func (c *STDServerConfig) Clone() Config {

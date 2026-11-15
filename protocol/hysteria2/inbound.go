@@ -4,15 +4,13 @@ import (
 	"context"
 	"net"
 	"net/http"
-	"net/http/httputil"
 	"net/netip"
-	"net/url"
-	"os"
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
 	"github.com/sagernet/sing-box/common/dialer"
+	"github.com/sagernet/sing-box/common/httpmasquerade"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
@@ -28,7 +26,6 @@ import (
 	M "github.com/sagernet/sing/common/metadata"
 	N "github.com/sagernet/sing/common/network"
 	"github.com/sagernet/sing/service"
-	"github.com/sagernet/sing/service/filemanager"
 )
 
 func RegisterInbound(registry *inbound.Registry) {
@@ -71,47 +68,9 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			return nil, E.New("unknown obfs type: ", options.Obfs.Type)
 		}
 	}
-	var masqueradeHandler http.Handler
-	if options.Masquerade != nil && options.Masquerade.Type != "" {
-		switch options.Masquerade.Type {
-		case C.Hysterai2MasqueradeTypeFile:
-			masqueradeDirectory := filemanager.BasePath(ctx, os.ExpandEnv(options.Masquerade.FileOptions.Directory))
-			_, err = filemanager.ReadDir(ctx, masqueradeDirectory)
-			if err != nil && !os.IsNotExist(err) {
-				return nil, E.Cause(err, "read masquerade directory")
-			}
-			masqueradeHandler = http.FileServer(http.Dir(masqueradeDirectory))
-		case C.Hysterai2MasqueradeTypeProxy:
-			masqueradeURL, err := url.Parse(options.Masquerade.ProxyOptions.URL)
-			if err != nil {
-				return nil, E.Cause(err, "parse masquerade URL")
-			}
-			masqueradeHandler = &httputil.ReverseProxy{
-				Rewrite: func(r *httputil.ProxyRequest) {
-					r.SetURL(masqueradeURL)
-					if !options.Masquerade.ProxyOptions.RewriteHost {
-						r.Out.Host = r.In.Host
-					}
-				},
-				ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
-					w.WriteHeader(http.StatusBadGateway)
-				},
-			}
-		case C.Hysterai2MasqueradeTypeString:
-			masqueradeHandler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if options.Masquerade.StringOptions.StatusCode != 0 {
-					w.WriteHeader(options.Masquerade.StringOptions.StatusCode)
-				}
-				for key, values := range options.Masquerade.StringOptions.Headers {
-					for _, value := range values {
-						w.Header().Add(key, value)
-					}
-				}
-				w.Write([]byte(options.Masquerade.StringOptions.Content))
-			})
-		default:
-			return nil, E.New("unknown masquerade type: ", options.Masquerade.Type)
-		}
+	masqueradeHandler, err := httpmasquerade.BuildHandler(ctx, options.Masquerade)
+	if err != nil {
+		return nil, err
 	}
 	inbound := &Inbound{
 		Adapter: inbound.NewAdapter(C.TypeHysteria2, tag),

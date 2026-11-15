@@ -65,3 +65,28 @@ func (w *KTlSServerConfig) Clone() Config {
 		w.kernelRx,
 	}
 }
+
+func (w *KTLSClientConfig) UTLSFingerprint() (string, string, bool) {
+	return UTLSFingerprint(w.Config)
+}
+
+func (w *KTLSClientConfig) STDConfigForQUIC() (*STDConfig, error) {
+	return STDConfigForQUIC(w.Config)
+}
+
+func (w *KTLSClientConfig) STDConfigForQUICContext(ctx context.Context) (*STDConfig, error) {
+	return STDConfigForQUICContext(ctx, w.Config)
+}
+
+func (w *KTLSClientConfig) RefreshECHConfigList(ctx context.Context) ([]byte, error) {
+	list, _, err := RefreshECHConfigList(ctx, w.Config)
+	return list, err
+}
+
+func (w *KTLSClientConfig) SupportsQUIC() bool {
+	return SupportsQUIC(w.Config)
+}
+
+func (w *KTlSServerConfig) SupportsQUIC() bool {
+	return SupportsQUIC(w.ServerConfig)
+}

@@ -4,16 +4,18 @@ import (
 	"context"
 	"errors"
 	"io"
-	"net"
 	"net/http"
 	"net/url"
 	"os"
 
+	"github.com/sagernet/sing-box/common/browserhdr"
+	"github.com/sagernet/sing-box/common/httpclient"
+	"github.com/sagernet/sing-box/common/tls"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common/bufio"
 	E "github.com/sagernet/sing/common/exceptions"
-	M "github.com/sagernet/sing/common/metadata"
 
 	"github.com/spf13/cobra"
 )
@@ -45,17 +47,17 @@ func fetch(args []string) error {
 		return err
 	}
 	defer instance.Close()
+	dialer, err := createDialer(instance, commandToolsFlagOutbound)
+	if err != nil {
+		return err
+	}
+	transport, err := httpclient.NewDialerTransport(context.Background(), log.NewNOPFactory().Logger(), dialer, option.HTTPClientOptions{})
+	if err != nil {
+		return err
+	}
+	defer transport.Close()
 	httpClient = &http.Client{
-		Transport: &http.Transport{
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				dialer, err := createDialer(instance, commandToolsFlagOutbound)
-				if err != nil {
-					return nil, err
-				}
-				return dialer.DialContext(ctx, network, M.ParseSocksaddr(addr))
-			},
-			ForceAttemptHTTP2: true,
-		},
+		Transport: transport,
 	}
 	defer httpClient.CloseIdleConnections()
 	if C.WithQUIC {
@@ -101,7 +103,11 @@ func fetchHTTP(httpClient *http.Client, parsedURL *url.URL) error {
 	if err != nil {
 		return err
 	}
-	request.Header.Add("User-Agent", "curl/7.88.0")
+	if tls.HasUTLS {
+		browserhdr.ApplyForUTLS(request.Header, "chrome", "", "fetch")
+	} else {
+		request.Header.Add("User-Agent", "curl/7.88.0")
+	}
 	response, err := httpClient.Do(request)
 	if err != nil {
 		return err

@@ -3,19 +3,19 @@ package clashapi
 import (
 	"archive/zip"
 	"context"
-	"crypto/tls"
 	"io"
-	"net"
 	"net/http"
 	"path/filepath"
 	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
-	C "github.com/sagernet/sing-box/constant"
+	"github.com/sagernet/sing-box/common/browserhdr"
+	"github.com/sagernet/sing-box/common/httpclient"
+	"github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/option"
 	"github.com/sagernet/sing/common"
 	E "github.com/sagernet/sing/common/exceptions"
-	M "github.com/sagernet/sing/common/metadata"
-	"github.com/sagernet/sing/common/ntp"
+	"github.com/sagernet/sing/common/logger"
 	"github.com/sagernet/sing/service/filemanager"
 )
 
@@ -54,21 +54,24 @@ func (s *Server) downloadExternalUI() error {
 		detour = outbound
 	}
 	s.logger.Info("downloading external ui using outbound/", detour.Type(), "[", detour.Tag(), "]")
+	ctxLogger, _ := s.logger.(logger.ContextLogger)
+	transport, err := httpclient.NewDialerTransport(s.ctx, ctxLogger, detour, option.HTTPClientOptions{})
+	if err != nil {
+		return err
+	}
+	defer transport.Close()
 	httpClient := &http.Client{
-		Transport: &http.Transport{
-			ForceAttemptHTTP2:   true,
-			TLSHandshakeTimeout: C.TCPTimeout,
-			DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-				return detour.DialContext(ctx, network, M.ParseSocksaddr(addr))
-			},
-			TLSClientConfig: &tls.Config{
-				Time:    ntp.TimeFuncFromContext(s.ctx),
-				RootCAs: adapter.RootPoolFromContext(s.ctx),
-			},
-		},
+		Transport: transport,
 	}
 	defer httpClient.CloseIdleConnections()
-	response, err := httpClient.Get(downloadURL)
+	request, err := http.NewRequestWithContext(s.ctx, http.MethodGet, downloadURL, nil)
+	if err != nil {
+		return err
+	}
+	if tls.HasUTLS {
+		browserhdr.ApplyForUTLS(request.Header, "chrome", "", "fetch")
+	}
+	response, err := httpClient.Do(request)
 	if err != nil {
 		return err
 	}

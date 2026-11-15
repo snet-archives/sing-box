@@ -6,6 +6,8 @@ import (
 	"crypto/tls"
 	"net"
 	"unsafe"
+
+	N "github.com/sagernet/sing/common/network"
 )
 
 // cmd/compile creates the method symbols of *tls.Conn and of its field types with their
@@ -29,7 +31,7 @@ var methodRegistry []func(conn net.Conn) (unsafe.Pointer, *Methods, bool)
 
 func init() {
 	methodRegistry = append(methodRegistry, func(conn net.Conn) (unsafe.Pointer, *Methods, bool) {
-		tlsConn, loaded := conn.(*tls.Conn)
+		tlsConn, loaded := N.CastReader[*tls.Conn](conn)
 		if !loaded {
 			return nil, nil, false
 		}

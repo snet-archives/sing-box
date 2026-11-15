@@ -12,10 +12,14 @@ import (
 )
 
 func CloneHTTP2Transport(transport *http2.Transport) *http2.Transport {
+	if transport == nil {
+		return nil
+	}
 	return &http2.Transport{
 		ReadIdleTimeout: transport.ReadIdleTimeout,
 		PingTimeout:     transport.PingTimeout,
 		DialTLSContext:  transport.DialTLSContext,
+		Fingerprint:     transport.Fingerprint.Clone(),
 	}
 }
 

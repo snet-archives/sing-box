@@ -25,6 +25,7 @@ func newHTTP2Transport(rawDialer N.Dialer, baseTLSConfig tls.Config, options opt
 	if err != nil {
 		return nil, err
 	}
+	h2Transport.Fingerprint = tls.HTTP2Fingerprint(baseTLSConfig)
 	h2Transport.DialTLSContext = func(ctx context.Context, network, addr string, _ *stdTLS.Config) (net.Conn, error) {
 		return dialTLS(ctx, rawDialer, baseTLSConfig, M.ParseSocksaddr(addr), []string{http2.NextProtoTLS}, http2.NextProtoTLS)
 	}

@@ -167,7 +167,7 @@ type _DERPSTUNListenOptions struct {
 type DERPSTUNListenOptions _DERPSTUNListenOptions
 
 func (d DERPSTUNListenOptions) MarshalJSON() ([]byte, error) {
-	if d.Enabled && d.ListenPort != 0 && d.ListenOptions == (ListenOptions{ListenPort: d.ListenPort}) {
+	if d.Enabled && d.ListenPort != 0 && reflect.DeepEqual(d.ListenOptions, ListenOptions{ListenPort: d.ListenPort}) {
 		return json.Marshal(d.ListenPort)
 	}
 	return json.Marshal(_DERPSTUNListenOptions(d))

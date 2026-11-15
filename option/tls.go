@@ -126,6 +126,8 @@ type OutboundTLSOptions struct {
 	ClientKeyPath              string                          `json:"client_key_path,omitempty"`
 	Fragment                   bool                            `json:"fragment,omitempty"`
 	FragmentFallbackDelay      badoption.Duration              `json:"fragment_fallback_delay,omitempty"`
+	FragmentLength             string                          `json:"fragment_length,omitempty"`
+	FragmentInterval           string                          `json:"fragment_interval,omitempty"`
 	RecordFragment             bool                            `json:"record_fragment,omitempty"`
 	Spoof                      string                          `json:"spoof,omitempty"`
 	SpoofMethod                string                          `json:"spoof_method,omitempty" enum:"wrong-sequence,wrong-checksum,wrong-ack,wrong-md5,wrong-timestamp"`
@@ -211,11 +213,20 @@ func (c CurvePreference) DescribeSchema(builder schema.Builder) (*schema.Node, e
 }
 
 type InboundRealityOptions struct {
-	Enabled           bool                           `json:"enabled,omitempty"`
-	Handshake         InboundRealityHandshakeOptions `json:"handshake,omitempty"`
-	PrivateKey        string                         `json:"private_key,omitempty"`
-	ShortID           badoption.Listable[string]     `json:"short_id,omitempty"`
-	MaxTimeDifference badoption.Duration             `json:"max_time_difference,omitempty"`
+	Enabled               bool                                `json:"enabled,omitempty"`
+	Handshake             InboundRealityHandshakeOptions      `json:"handshake,omitempty"`
+	PrivateKey            string                              `json:"private_key,omitempty"`
+	ShortID               badoption.Listable[string]          `json:"short_id,omitempty"`
+	MaxTimeDifference     badoption.Duration                  `json:"max_time_difference,omitempty"`
+	MLDSA65Seed           string                              `json:"mldsa65_seed,omitempty"`
+	LimitFallbackUpload   *InboundRealityLimitFallbackOptions `json:"limit_fallback_upload,omitempty"`
+	LimitFallbackDownload *InboundRealityLimitFallbackOptions `json:"limit_fallback_download,omitempty"`
+}
+
+type InboundRealityLimitFallbackOptions struct {
+	AfterBytes       uint64 `json:"after_bytes,omitempty"`
+	BytesPerSec      uint64 `json:"bytes_per_sec,omitempty"`
+	BurstBytesPerSec uint64 `json:"burst_bytes_per_sec,omitempty"`
 }
 
 type InboundRealityHandshakeOptions struct {
@@ -248,11 +259,13 @@ type OutboundECHOptions struct {
 
 type OutboundUTLSOptions struct {
 	Enabled     bool   `json:"enabled,omitempty"`
-	Fingerprint string `json:"fingerprint,omitempty" enum:"chrome_psk,chrome_psk_shuffle,chrome_padding_psk_shuffle,chrome_pq,chrome_pq_psk,chrome,firefox,edge,safari,360,qq,ios,android,random,randomized"`
+	Fingerprint string `json:"fingerprint,omitempty" enum:"chrome_131,chrome_133,chrome_120,chrome_pq,chrome_pq_psk,chrome_psk,chrome_psk_shuffle,chrome_padding_psk_shuffle,chrome,firefox,firefox_120,firefox_148,edge,safari,safari_16_0,safari_26_3,360,qq,ios,android,random,randomized,randomized_no_alpn"`
 }
 
 type OutboundRealityOptions struct {
-	Enabled   bool   `json:"enabled,omitempty"`
-	PublicKey string `json:"public_key,omitempty"`
-	ShortID   string `json:"short_id,omitempty"`
+	Enabled               bool   `json:"enabled,omitempty"`
+	PublicKey             string `json:"public_key,omitempty"`
+	ShortID               string `json:"short_id,omitempty"`
+	MLDSA65Verify         string `json:"mldsa65_verify,omitempty"`
+	DisableX25519MLKEM768 bool   `json:"disable_x25519_mlkem768,omitempty"`
 }

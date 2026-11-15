@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/dialermask"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/experimental/deprecated"
 	"github.com/sagernet/sing-box/option"
@@ -60,6 +61,12 @@ func NewWithOptions(options Options) (N.Dialer, error) {
 		dialer, err = NewDefault(options.Context, dialOptions)
 		if err != nil {
 			return nil, err
+		}
+	}
+	if len(dialOptions.Masks) > 0 {
+		dialer, err = dialermask.WrapDialer(dialer, options.Context, dialOptions.Masks)
+		if err != nil {
+			return nil, E.Cause(err, "masks")
 		}
 	}
 	if options.RemoteIsDomain && (!hasDetour || options.ResolverOnDetour || dialOptions.DomainResolver != nil && dialOptions.DomainResolver.Server != "") {

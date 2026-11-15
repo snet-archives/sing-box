@@ -5,10 +5,12 @@ import (
 	"net"
 	"net/netip"
 	"os"
+	"slices"
 	"strings"
 	"syscall"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/dialermask"
 	"github.com/sagernet/sing-box/common/redir"
 	"github.com/sagernet/sing/common/buf"
 	sBufio "github.com/sagernet/sing/common/bufio"
@@ -25,6 +27,19 @@ func (l *Listener) ListenUDP() (net.PacketConn, error) {
 }
 
 func (l *Listener) ListenUDPWithConfig(listenConfig net.ListenConfig) (net.PacketConn, error) {
+	var (
+		maskPipeline *dialermask.Pipeline
+		err          error
+	)
+	if len(l.listenOptions.Masks) > 0 {
+		maskPipeline, err = dialermask.ParseMaskOptions(l.listenOptions.Masks)
+		if err != nil {
+			return nil, E.Cause(err, "masks")
+		}
+		if l.tproxy && maskPipeline.HasUDPMasks() {
+			return nil, E.New("masks for UDP are not supported with tproxy")
+		}
+	}
 	bindAddr := M.SocksaddrFrom(l.listenOptions.Listen.Build(netip.AddrFrom4([4]byte{127, 0, 0, 1})), l.listenOptions.ListenPort)
 	var followInterface func(conn syscall.Conn)
 	if l.listenOptions.BindInterface != "" {
@@ -56,6 +71,36 @@ func (l *Listener) ListenUDPWithConfig(listenConfig net.ListenConfig) (net.Packe
 			})
 		})
 	}
+	if maskPipeline != nil && maskPipeline.HasUDPHop() {
+		hopPorts := maskPipeline.UDPHopPorts()
+		if bindAddr.Port != 0 && !slices.Contains(hopPorts, bindAddr.Port) {
+			hopPorts = append([]uint16{bindAddr.Port}, hopPorts...)
+		}
+		listenPortFn := func(port uint16) (net.PacketConn, error) {
+			target := M.SocksaddrFrom(bindAddr.Addr, port)
+			conn, listenErr := ListenNetworkNamespace[net.PacketConn](l.ctx, l.listenOptions.NetNs, func() (net.PacketConn, error) {
+				return listenConfig.ListenPacket(l.ctx, M.NetworkFromNetAddr(N.NetworkUDP, target.Addr), target.String())
+			})
+			if listenErr != nil {
+				return nil, listenErr
+			}
+			if followInterface != nil {
+				if rawConn, ok := conn.(syscall.Conn); ok {
+					followInterface(rawConn)
+				}
+			}
+			return conn, nil
+		}
+		hopConn, err := dialermask.NewHopServerPacketConn(hopPorts, listenPortFn)
+		if err != nil {
+			return nil, err
+		}
+		maskedConn := maskPipeline.WrapPacketConn(hopConn, false)
+		l.udpMaskConn = maskedConn
+		l.udpAddr = bindAddr
+		l.logger.Info("udp hop server started at ", hopConn.LocalAddr(), " ports=", hopPorts)
+		return maskedConn, nil
+	}
 	udpConn, err := ListenNetworkNamespace[net.PacketConn](l.ctx, l.listenOptions.NetNs, func() (net.PacketConn, error) {
 		return listenConfig.ListenPacket(l.ctx, M.NetworkFromNetAddr(N.NetworkUDP, bindAddr.Addr), bindAddr.String())
 	})
@@ -66,6 +111,12 @@ func (l *Listener) ListenUDPWithConfig(listenConfig net.ListenConfig) (net.Packe
 	l.udpAddr = bindAddr
 	if followInterface != nil {
 		followInterface(l.udpConn)
+	}
+	if maskPipeline != nil && maskPipeline.HasUDPMasks() {
+		maskedConn := maskPipeline.WrapPacketConn(udpConn, false)
+		l.udpMaskConn = maskedConn
+		l.logger.Info("udp server started at ", udpConn.LocalAddr())
+		return maskedConn, nil
 	}
 	l.logger.Info("udp server started at ", udpConn.LocalAddr())
 	return udpConn, err
@@ -110,13 +161,21 @@ func (l *Listener) PacketWriter() N.PacketWriter {
 	return (*packetWriter)(l)
 }
 
+func (l *Listener) activeUDPConn() net.PacketConn {
+	if l.udpMaskConn != nil {
+		return l.udpMaskConn
+	}
+	return l.udpConn
+}
+
 func (l *Listener) loopUDPIn() {
 	defer close(l.packetOutboundClosed)
+	udpSource := l.activeUDPConn()
 	if l.oobPacketHandler == nil {
 		if batchHandler, isBatchHandler := l.packetHandler.(adapter.PacketBatchHandler); isBatchHandler {
-			packetConn := sBufio.NewPacketConn(l.udpConn)
+			packetConn := sBufio.NewPacketConn(udpSource)
 			if readWaiter, created := sBufio.CreatePacketBatchReadWaiter(packetConn); created {
-				l.loopUDPInBatch(batchHandler, readWaiter)
+				l.loopUDPInBatch(batchHandler, readWaiter, udpSource)
 				return
 			}
 		}
@@ -158,7 +217,17 @@ func (l *Listener) loopUDPIn() {
 			} else {
 				buffer.Reset()
 			}
-			n, addr, err := l.udpConn.ReadFromUDPAddrPort(buffer.FreeBytes())
+			var (
+				n    int
+				addr net.Addr
+				ap   netip.AddrPort
+				err  error
+			)
+			if l.udpMaskConn != nil {
+				n, addr, err = l.udpMaskConn.ReadFrom(buffer.FreeBytes())
+			} else {
+				n, ap, err = l.udpConn.ReadFromUDPAddrPort(buffer.FreeBytes())
+			}
 			if err != nil {
 				if l.threadUnsafePacketWriter {
 					buffer.Release()
@@ -166,17 +235,21 @@ func (l *Listener) loopUDPIn() {
 				if l.shutdown.Load() && E.IsClosed(err) {
 					return
 				}
-				l.udpConn.Close()
+				udpSource.Close()
 				l.logger.Error("udp listener closed: ", err)
 				return
 			}
 			buffer.Truncate(n)
-			l.packetHandler.NewPacket(buffer, M.SocksaddrFromNetIP(addr).Unwrap())
+			if l.udpMaskConn != nil {
+				l.packetHandler.NewPacket(buffer, M.SocksaddrFromNet(addr).Unwrap())
+			} else {
+				l.packetHandler.NewPacket(buffer, M.SocksaddrFromNetIP(ap).Unwrap())
+			}
 		}
 	}
 }
 
-func (l *Listener) loopUDPInBatch(handler adapter.PacketBatchHandler, readWaiter N.PacketBatchReadWaiter) {
+func (l *Listener) loopUDPInBatch(handler adapter.PacketBatchHandler, readWaiter N.PacketBatchReadWaiter, udpSource net.PacketConn) {
 	readWaitOptions := N.ReadWaitOptions{
 		BatchSize: sBufio.DefaultPacketReadBatchSize,
 	}
@@ -188,7 +261,7 @@ func (l *Listener) loopUDPInBatch(handler adapter.PacketBatchHandler, readWaiter
 			if l.shutdown.Load() && E.IsClosed(err) {
 				return
 			}
-			l.udpConn.Close()
+			udpSource.Close()
 			l.logger.Error("udp listener closed: ", err)
 			return
 		}
@@ -197,7 +270,7 @@ func (l *Listener) loopUDPInBatch(handler adapter.PacketBatchHandler, readWaiter
 }
 
 func (l *Listener) loopUDPOut() {
-	packetConn := sBufio.NewPacketConn(l.udpConn)
+	packetConn := sBufio.NewPacketConn(l.activeUDPConn())
 	batchWriter := sBufio.NewPacketBatchWriter(packetConn)
 	packets := make([]*N.PacketBuffer, 0, udpOutputBatchSize)
 	buffers := make([]*buf.Buffer, 0, udpOutputBatchSize)

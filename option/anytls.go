@@ -5,8 +5,11 @@ import "github.com/sagernet/sing/common/json/badoption"
 type AnyTLSInboundOptions struct {
 	ListenOptions
 	InboundTLSOptionsContainer
-	Users         []AnyTLSUser               `json:"users,omitempty"`
-	PaddingScheme badoption.Listable[string] `json:"padding_scheme,omitempty"`
+	Users           []AnyTLSUser               `json:"users,omitempty"`
+	PaddingScheme   badoption.Listable[string] `json:"padding_scheme,omitempty"`
+	Fallback        *ServerOptions             `json:"fallback,omitempty"`
+	FallbackForALPN map[string]*ServerOptions  `json:"fallback_for_alpn,omitempty"`
+	Masquerade      *Hysteria2Masquerade       `json:"masquerade,omitempty"`
 }
 
 type AnyTLSUser struct {

@@ -12,12 +12,13 @@ import (
 )
 
 type _V2RayTransportOptions struct {
-	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade"`
+	Type               string                  `json:"type" enum:"http,ws,quic,grpc,httpupgrade,xhttp"`
 	HTTPOptions        V2RayHTTPOptions        `json:"-"`
 	WebsocketOptions   V2RayWebsocketOptions   `json:"-"`
 	QUICOptions        V2RayQUICOptions        `json:"-"`
 	GRPCOptions        V2RayGRPCOptions        `json:"-"`
 	HTTPUpgradeOptions V2RayHTTPUpgradeOptions `json:"-"`
+	XHTTPOptions       V2RayXHTTPOptions       `json:"-"`
 }
 
 type V2RayTransportOptions _V2RayTransportOptions
@@ -35,6 +36,8 @@ func (o V2RayTransportOptions) MarshalJSON() ([]byte, error) {
 		v = o.GRPCOptions
 	case C.V2RayTransportTypeHTTPUpgrade:
 		v = o.HTTPUpgradeOptions
+	case C.V2RayTransportTypeXHTTP:
+		v = o.XHTTPOptions
 	case "":
 		return nil, E.New("missing transport type")
 	default:
@@ -60,6 +63,8 @@ func (o *V2RayTransportOptions) UnmarshalJSON(bytes []byte) error {
 		v = &o.GRPCOptions
 	case C.V2RayTransportTypeHTTPUpgrade:
 		v = &o.HTTPUpgradeOptions
+	case C.V2RayTransportTypeXHTTP:
+		v = &o.XHTTPOptions
 	default:
 		return E.New("unknown transport type: " + o.Type)
 	}
@@ -78,6 +83,7 @@ func (o V2RayTransportOptions) DescribeSchema(builder schema.Builder) (*schema.N
 			{Value: C.V2RayTransportTypeQUIC, StructType: reflect.TypeFor[V2RayQUICOptions]()},
 			{Value: C.V2RayTransportTypeGRPC, StructType: reflect.TypeFor[V2RayGRPCOptions]()},
 			{Value: C.V2RayTransportTypeHTTPUpgrade, StructType: reflect.TypeFor[V2RayHTTPUpgradeOptions]()},
+			{Value: C.V2RayTransportTypeXHTTP, StructType: reflect.TypeFor[V2RayXHTTPOptions]()},
 		}, nil)
 	})
 }
@@ -112,4 +118,35 @@ type V2RayHTTPUpgradeOptions struct {
 	Host    string               `json:"host,omitempty"`
 	Path    string               `json:"path,omitempty"`
 	Headers badoption.HTTPHeader `json:"headers,omitempty"`
+}
+
+// V2RayXHTTPOptions configures XHTTP (SplitHTTP) transport with split
+// uplink/downlink channels, multi-placement metadata, traffic shaping, and Xmux pooling.
+type V2RayXHTTPOptions struct {
+	Host                 badoption.Listable[string] `json:"host,omitempty"`
+	Path                 string                     `json:"path,omitempty"`
+	Mode                 string                     `json:"mode,omitempty" enum:"auto,packet-up,stream-up,stream-one"`
+	Headers              badoption.HTTPHeader       `json:"headers,omitempty"`
+	NoGRPCHeader         bool                       `json:"no_grpc_header,omitempty"`
+	NoSSEHeader          bool                       `json:"no_sse_header,omitempty"`
+	XPaddingBytes        XmuxRange                  `json:"x_padding_bytes,omitempty"`
+	ScMaxEachPostBytes   XmuxRange                  `json:"sc_max_each_post_bytes,omitempty"`
+	ScMinPostsIntervalMs XmuxRange                  `json:"sc_min_posts_interval_ms,omitempty"`
+	ScMaxBufferedPosts   XmuxRange                  `json:"sc_max_buffered_posts,omitempty"`
+	ScMaxConcurrentPosts XmuxRange                  `json:"sc_max_concurrent_posts,omitempty"`
+	ScStreamUpServerSecs XmuxRange                  `json:"sc_stream_up_server_secs,omitempty"`
+	ScDownlinkServerSecs XmuxRange                  `json:"sc_downlink_server_secs,omitempty"`
+	XPaddingPlacement    string                     `json:"x_padding_placement,omitempty" enum:"header,query,cookie,query_in_header"`
+	SessionPlacement     string                     `json:"session_placement,omitempty" enum:"path,query,header,cookie"`
+	SeqPlacement         string                     `json:"seq_placement,omitempty" enum:"path,query,header,cookie"`
+	UplinkDataPlacement  string                     `json:"uplink_data_placement,omitempty" enum:"body,header,cookie,query"`
+	UplinkChunkSize      int                        `json:"uplink_chunk_size,omitempty"`
+	Xmux                 *XmuxOptions               `json:"xmux,omitempty"`
+	QUIC                 *QUICOptions               `json:"quic,omitempty"`
+	DownloadAddress      string                     `json:"download_address,omitempty"`
+	DownloadPort         uint16                     `json:"download_port,omitempty"`
+	DownloadDialer       *DialerOptions             `json:"download_dialer,omitempty"`
+	DownloadTLS          *OutboundTLSOptions        `json:"download_tls,omitempty"`
+	IdleTimeout          badoption.Duration         `json:"idle_timeout,omitempty"`
+	PingTimeout          badoption.Duration         `json:"ping_timeout,omitempty"`
 }

@@ -27,12 +27,13 @@ type HTTPSTransportWrapper struct {
 	closed         bool
 }
 
-func NewHTTPSTransportWrapper(dialer N.Dialer, serverAddr M.Socksaddr, fallback *atomic.Bool) *HTTPSTransportWrapper {
+func NewHTTPSTransportWrapper(dialer N.Dialer, serverAddr M.Socksaddr, fallback *atomic.Bool, h2Fingerprint *http2.FingerprintProfile) *HTTPSTransportWrapper {
 	wrapper := &HTTPSTransportWrapper{
 		fallback:    fallback,
 		connections: make(map[*httpsTrackedConn]struct{}),
 	}
 	wrapper.http2Transport = &http2.Transport{
+		Fingerprint: h2Fingerprint,
 		DialTLSContext: func(ctx context.Context, _, _ string, _ *tls.STDConfig) (net.Conn, error) {
 			resultConn, err := dialer.DialContext(ctx, N.NetworkTCP, serverAddr)
 			if err != nil {

@@ -25,6 +25,7 @@ type QUICOptions struct {
 	HTTP2Options
 	InitialPacketSize       int  `json:"initial_packet_size,omitempty"`
 	DisablePathMTUDiscovery bool `json:"disable_path_mtu_discovery,omitempty"`
+	DisableChromeParrot     bool `json:"disable_chrome_parrot,omitempty"`
 }
 
 type _HTTPClientOptions struct {

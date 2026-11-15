@@ -3,12 +3,14 @@ package vless
 import (
 	"context"
 	"net"
+	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/outbound"
 	"github.com/sagernet/sing-box/common/dialer"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/tls"
+	"github.com/sagernet/sing-box/common/vlessenc"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -42,6 +44,7 @@ type Outbound struct {
 	multiplexDialer *mux.Client
 	tlsConfig       tls.Config
 	tlsDialer       tls.Dialer
+	encConfig       *vlessenc.Client
 	transport       adapter.V2RayClientTransport
 	packetAddr      bool
 	xudp            bool
@@ -58,6 +61,28 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		if options.Transport != nil && options.Transport.Type != "" {
 			return nil, E.New("flow is incompatible with custom transport: ", options.Transport.Type)
 		}
+		if common.PtrValueOrDefault(options.Encryption).Enabled {
+			return nil, E.New("flow is incompatible with vless encryption")
+		}
+	}
+	serverAddr := options.ServerOptions.Build()
+	var encConfig *vlessenc.Client
+	if options.Encryption != nil && options.Encryption.Enabled {
+		encOptions := *options.Encryption
+		if strings.EqualFold(strings.TrimSpace(encOptions.XorMode), vlessenc.XorHTTP) && encOptions.HTTPHost == "" && options.Server != "" {
+			if serverAddr.Port != 0 && serverAddr.Port != 80 && serverAddr.Port != 443 {
+				encOptions.HTTPHost = serverAddr.String()
+			} else if serverAddr.Addr.Is6() {
+				encOptions.HTTPHost = "[" + serverAddr.AddrString() + "]"
+			} else {
+				encOptions.HTTPHost = serverAddr.AddrString()
+			}
+		}
+		var err error
+		encConfig, err = vlessenc.NewClient(encOptions)
+		if err != nil {
+			return nil, err
+		}
 	}
 	outboundDialer, err := dialer.New(ctx, options.DialerOptions, options.ServerIsDomain())
 	if err != nil {
@@ -67,7 +92,8 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		Adapter:    outbound.NewAdapterWithDialerOptions(C.TypeVLESS, tag, options.Network.Build(), options.DialerOptions),
 		logger:     logger,
 		dialer:     outboundDialer,
-		serverAddr: options.ServerOptions.Build(),
+		serverAddr: serverAddr,
+		encConfig:  encConfig,
 	}
 	if options.TLS != nil {
 		outbound.tlsConfig, err = tls.NewClientWithOptions(tls.ClientOptions{
@@ -77,6 +103,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			Options:       common.PtrValueOrDefault(options.TLS),
 			KTLSCompatible: common.PtrValueOrDefault(options.Transport).Type == "" &&
 				!common.PtrValueOrDefault(options.Multiplex).Enabled &&
+				!common.PtrValueOrDefault(options.Encryption).Enabled &&
 				options.Flow == "",
 		})
 		if err != nil {
@@ -103,7 +130,9 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 			return nil, E.New("unknown packet encoding: ", *options.PacketEncoding)
 		}
 	}
-	outbound.client, err = vless.NewClient(options.UUID, options.Flow, logger)
+	outbound.client, err = vless.NewClientWithOptions(options.UUID, options.Flow, logger, vless.ClientOptions{
+		PaddingSeed: options.PaddingSeed,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -196,10 +225,7 @@ func (h *Outbound) Start(stage adapter.StartStage, scope *adapter.Scope) error {
 
 type vlessDialer Outbound
 
-func (h *vlessDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
-	ctx, metadata := adapter.ExtendContext(ctx)
-	metadata.Outbound = h.Tag()
-	metadata.Destination = destination
+func (h *vlessDialer) dialTransportConn(ctx context.Context) (net.Conn, error) {
 	var conn net.Conn
 	var err error
 	if h.transport != nil {
@@ -209,6 +235,25 @@ func (h *vlessDialer) DialContext(ctx context.Context, network string, destinati
 	} else {
 		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
 	}
+	if err != nil {
+		return nil, err
+	}
+	if h.encConfig != nil {
+		encConn, encErr := h.encConfig.ClientHandshake(ctx, conn)
+		if encErr != nil {
+			_ = conn.Close()
+			return nil, encErr
+		}
+		conn = encConn
+	}
+	return conn, nil
+}
+
+func (h *vlessDialer) DialContext(ctx context.Context, network string, destination M.Socksaddr) (net.Conn, error) {
+	ctx, metadata := adapter.ExtendContext(ctx)
+	metadata.Outbound = h.Tag()
+	metadata.Destination = destination
+	conn, err := h.dialTransportConn(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -242,15 +287,7 @@ func (h *vlessDialer) ListenPacket(ctx context.Context, destination M.Socksaddr)
 	ctx, metadata := adapter.ExtendContext(ctx)
 	metadata.Outbound = h.Tag()
 	metadata.Destination = destination
-	var conn net.Conn
-	var err error
-	if h.transport != nil {
-		conn, err = h.transport.DialContext(ctx)
-	} else if h.tlsDialer != nil {
-		conn, err = h.tlsDialer.DialTLSContext(ctx, h.serverAddr)
-	} else {
-		conn, err = h.dialer.DialContext(ctx, N.NetworkTCP, h.serverAddr)
-	}
+	conn, err := h.dialTransportConn(ctx)
 	if err != nil {
 		common.Close(conn)
 		return nil, err

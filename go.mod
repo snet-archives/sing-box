@@ -7,6 +7,7 @@ require (
 	github.com/anthropics/anthropic-sdk-go v1.26.0
 	github.com/caddyserver/certmagic v0.25.3-0.20260421143802-60d9d8b415d6
 	github.com/caddyserver/zerossl v0.1.5
+	github.com/cloudflare/circl v1.6.5
 	github.com/coder/websocket v1.8.14
 	github.com/creack/pty v1.1.24
 	github.com/cretz/bine v0.2.0
@@ -200,7 +201,10 @@ require (
 )
 
 replace (
-	github.com/sagernet/sing-mux => github.com/snet-archives/sing-mux v0.3.10-0.20261114125634-6d6e9cb0485f
+	github.com/metacubex/utls => github.com/snet-archives/utls v1.9.0-alpha.1.0.20261114140116-49b02415f7dd
+	github.com/sagernet/sing-mux => github.com/snet-archives/sing-mux v0.3.10-0.20261114144106-de5b64f77bd8
 	github.com/sagernet/sing-quic => github.com/snet-archives/sing-quic v0.7.2-0.20261114125649-32cc8fd0d5eb
-	github.com/sagernet/sing-vmess => github.com/snet-archives/sing-vmess v0.2.9-0.20261114125701-428cbba65c3a
+	github.com/sagernet/sing-shadowtls => github.com/snet-archives/sing-shadowtls v0.2.2-0.20261114140338-f393e81c2b7b
+	github.com/sagernet/sing-vmess => github.com/snet-archives/sing-vmess v0.2.9-0.20261114142311-09dba9b129ff
+	golang.org/x/net => github.com/snet-archives/net v0.57.1-0.20261115053044-4374db8db2b6
 )

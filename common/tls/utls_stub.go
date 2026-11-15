@@ -11,6 +11,13 @@ import (
 	"github.com/sagernet/sing/common/logger"
 )
 
+// HasUTLS reports whether this build includes uTLS support.
+const HasUTLS = false
+
+// EnableUTLSIfAvailable is a no-op when built without uTLS support.
+func EnableUTLSIfAvailable(options *option.OutboundTLSOptions, fingerprint string) {
+}
+
 func NewUTLSClient(ctx context.Context, logger logger.ContextLogger, serverAddress string, options option.OutboundTLSOptions) (Config, error) {
 	return newUTLSClient(ctx, logger, serverAddress, options, false)
 }

@@ -2,6 +2,7 @@ package httpclient
 
 import (
 	"context"
+	"net/http"
 	"time"
 
 	"github.com/sagernet/sing-box/common/dialer"
@@ -84,6 +85,42 @@ func NewTransport(ctx context.Context, logger logger.ContextLogger, tag string, 
 	}
 	managedTransport.epoch.Store(&transportEpoch{transport: inner})
 	return managedTransport, nil
+}
+
+// DialerTransport is an outbound HTTP RoundTripper bound to a caller-supplied dialer.
+type DialerTransport interface {
+	http.RoundTripper
+	CloseIdleConnections()
+	Close() error
+}
+
+// NewDialerTransport builds an HTTP transport bound to rawDialer with uTLS Chrome TLS/HTTP2
+// enabled automatically when built with uTLS support unless overridden in options.TLS.
+func NewDialerTransport(ctx context.Context, ctxLogger logger.ContextLogger, rawDialer N.Dialer, options option.HTTPClientOptions) (DialerTransport, error) {
+	if rawDialer == nil {
+		return nil, E.New("missing dialer")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctxLogger == nil {
+		ctxLogger = logger.NOP()
+	}
+	tlsOptions := common.PtrValueOrDefault(options.TLS)
+	tlsOptions.Enabled = true
+	if tlsOptions.UTLS == nil || !tlsOptions.UTLS.Enabled {
+		tls.EnableUTLSIfAvailable(&tlsOptions, "chrome")
+	}
+	baseTLSConfig, err := tls.NewClientWithOptions(tls.ClientOptions{
+		Context:              ctx,
+		Logger:               ctxLogger,
+		Options:              tlsOptions,
+		AllowEmptyServerName: true,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return newTransport(rawDialer, baseTLSConfig, options)
 }
 
 func newTransport(rawDialer N.Dialer, baseTLSConfig tls.Config, options option.HTTPClientOptions) (innerTransport, error) {

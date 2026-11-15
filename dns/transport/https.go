@@ -48,6 +48,7 @@ type HTTPSTransport struct {
 	destination      *url.URL
 	headers          http.Header
 	serverAddr       M.Socksaddr
+	h2Fingerprint    *http2.FingerprintProfile
 	fallback         *atomic.Bool
 	keepIdle         atomic.Bool
 	transportAccess  sync.Mutex
@@ -132,6 +133,7 @@ func NewHTTPSRaw(
 		// plain HTTP DoH used by Tailscale
 		fallback.Store(true)
 	}
+	h2Fingerprint := tls.HTTP2FingerprintForHeaders(tlsConfig, headers, "")
 	transport := &HTTPSTransport{
 		TransportAdapter: adapter,
 		logger:           logger,
@@ -139,8 +141,9 @@ func NewHTTPSRaw(
 		destination:      destination,
 		headers:          headers,
 		serverAddr:       serverAddr,
+		h2Fingerprint:    h2Fingerprint,
 		fallback:         fallback,
-		transport:        NewHTTPSTransportWrapper(dialer, serverAddr, fallback),
+		transport:        NewHTTPSTransportWrapper(dialer, serverAddr, fallback, h2Fingerprint),
 	}
 	transport.keepIdle.Store(true)
 	return transport
@@ -178,7 +181,7 @@ func (t *HTTPSTransport) CloseIdleConnections() {
 
 func (t *HTTPSTransport) resetTransportLocked() {
 	oldTransport := t.transport
-	t.transport = NewHTTPSTransportWrapper(t.dialer, t.serverAddr, t.fallback)
+	t.transport = NewHTTPSTransportWrapper(t.dialer, t.serverAddr, t.fallback, t.h2Fingerprint)
 	t.transportResetAt = time.Now()
 	oldTransport.Close()
 }

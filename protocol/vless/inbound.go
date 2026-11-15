@@ -2,15 +2,20 @@ package vless
 
 import (
 	"context"
+	"errors"
 	"net"
+	"net/http"
 	"os"
+	"strings"
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/httpmasquerade"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/mux"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/uot"
+	"github.com/sagernet/sing-box/common/vlessenc"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
 	"github.com/sagernet/sing-box/option"
@@ -35,15 +40,17 @@ var _ adapter.TCPInjectableInbound = (*Inbound)(nil)
 
 type Inbound struct {
 	inbound.Adapter
-	ctx        context.Context
-	router     adapter.ConnectionRouterEx
-	logger     logger.ContextLogger
-	listener   *listener.Listener
-	users      []option.VLESSUser
-	service    *vless.Service[int]
-	tlsConfig  tls.ServerConfig
-	transport  adapter.V2RayServerTransport
-	references []string
+	ctx               context.Context
+	router            adapter.ConnectionRouterEx
+	logger            logger.ContextLogger
+	listener          *listener.Listener
+	users             []option.VLESSUser
+	service           *vless.Service[int]
+	tlsConfig         tls.ServerConfig
+	decConfig         *vlessenc.Server
+	masqueradeHandler http.Handler
+	transport         adapter.V2RayServerTransport
+	references        []string
 }
 
 func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLogger, tag string, options option.VLESSInboundOptions) (adapter.Inbound, error) {
@@ -67,20 +74,46 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		if options.Transport != nil && options.Transport.Type != "" {
 			return nil, E.New("flow is incompatible with custom transport: ", options.Transport.Type)
 		}
+		if common.PtrValueOrDefault(options.Decryption).Enabled {
+			return nil, E.New("flow is incompatible with vless decryption")
+		}
 	}
 	var err error
+	if options.Decryption != nil && options.Decryption.Enabled {
+		inbound.decConfig, err = vlessenc.NewServer(*options.Decryption)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if options.Masquerade != nil && options.Masquerade.Type != "" {
+		if options.Transport != nil && options.Transport.Type != "" {
+			return nil, E.New("masquerade is incompatible with custom transport: ", options.Transport.Type)
+		}
+		if inbound.decConfig == nil || !strings.EqualFold(strings.TrimSpace(options.Decryption.XorMode), vlessenc.XorHTTP) {
+			return nil, E.New(`masquerade requires decryption with xor_mode "http"`)
+		}
+		inbound.masqueradeHandler, err = httpmasquerade.BuildHandler(ctx, options.Masquerade)
+		if err != nil {
+			return nil, E.Cause(err, "create masquerade handler")
+		}
+	}
 	inbound.router, err = mux.NewRouterWithOptions(inbound.router, logger, common.PtrValueOrDefault(options.Multiplex))
 	if err != nil {
 		return nil, err
 	}
 	service := vless.NewService[int](logger, adapter.NewUpstreamContextHandler(inbound.newConnectionEx, inbound.newPacketConnectionEx))
-	service.UpdateUsers(common.MapIndexed(inbound.users, func(index int, _ option.VLESSUser) int {
+	err = service.UpdateUsersWithPaddingSeed(common.MapIndexed(inbound.users, func(index int, _ option.VLESSUser) int {
 		return index
 	}), common.Map(inbound.users, func(it option.VLESSUser) string {
 		return it.UUID
 	}), common.Map(inbound.users, func(it option.VLESSUser) string {
 		return it.Flow
+	}), common.Map(inbound.users, func(it option.VLESSUser) []uint32 {
+		return it.PaddingSeed
 	}))
+	if err != nil {
+		return nil, err
+	}
 	inbound.service = service
 	if options.TLS != nil {
 		inbound.tlsConfig, err = tls.NewServerWithOptions(tls.ServerOptions{
@@ -89,6 +122,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 			Options: common.PtrValueOrDefault(options.TLS),
 			KTLSCompatible: common.PtrValueOrDefault(options.Transport).Type == "" &&
 				!common.PtrValueOrDefault(options.Multiplex).Enabled &&
+				!common.PtrValueOrDefault(options.Decryption).Enabled &&
 				common.All(options.Users, func(it option.VLESSUser) bool {
 					return it.Flow == ""
 				}),
@@ -173,6 +207,21 @@ func (h *Inbound) NewConnection(ctx context.Context, conn net.Conn, metadata ada
 			return
 		}
 		conn = tlsConn
+	}
+	if h.decConfig != nil {
+		decConn, err := h.decConfig.ServerHandshake(ctx, conn)
+		if err != nil {
+			var fallbackErr *vlessenc.HandshakeFallbackError
+			if errors.As(err, &fallbackErr) && h.masqueradeHandler != nil {
+				h.logger.DebugContext(ctx, "process connection from ", metadata.Source, ": serving masquerade response")
+				httpmasquerade.ServeConn(ctx, h.masqueradeHandler, fallbackErr.Conn, onClose)
+				return
+			}
+			N.CloseOnHandshakeFailure(conn, onClose, err)
+			h.logger.ErrorContext(ctx, E.Cause(err, "process connection from ", metadata.Source, ": VLESS decryption handshake"))
+			return
+		}
+		conn = decConn
 	}
 	err := h.service.NewConnection(adapter.WithContext(ctx, &metadata), conn, metadata.Source, onClose)
 	if err != nil {

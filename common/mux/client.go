@@ -43,6 +43,7 @@ func NewClientWithOptions(dialer N.Dialer, logger logger.Logger, options option.
 		MaxStreams:     options.MaxStreams,
 		Padding:        options.Padding,
 		Brutal:         brutalOptions,
+		Xmux:           options.Xmux.ToMux(),
 	})
 }
 

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/adapter"
+	"github.com/sagernet/sing-box/common/dialermask"
 	"github.com/sagernet/sing-box/common/redir"
 	C "github.com/sagernet/sing-box/constant"
 	"github.com/sagernet/sing-box/log"
@@ -25,6 +26,13 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
 		return nil, E.New("Proxy Protocol is deprecated and removed in sing-box 1.6.0")
 	}
 	var err error
+	var maskPipeline *dialermask.Pipeline
+	if len(l.listenOptions.Masks) > 0 {
+		maskPipeline, err = dialermask.ParseMaskOptions(l.listenOptions.Masks)
+		if err != nil {
+			return nil, E.Cause(err, "masks")
+		}
+	}
 	bindAddr := M.SocksaddrFrom(l.listenOptions.Listen.Build(netip.AddrFrom4([4]byte{127, 0, 0, 1})), l.listenOptions.ListenPort)
 	var (
 		listenConfig    net.ListenConfig
@@ -85,6 +93,14 @@ func (l *Listener) ListenTCP() (net.Listener, error) {
 		followInterface(tcpListener.(syscall.Conn))
 	}
 	l.logger.Info("tcp server started at ", tcpListener.Addr())
+	if maskPipeline != nil && maskPipeline.HasTCPMasks() {
+		maskedListener, maskErr := dialermask.WrapTCPListener(l.ctx, tcpListener, l.listenOptions.Masks)
+		if maskErr != nil {
+			tcpListener.Close()
+			return nil, maskErr
+		}
+		tcpListener = maskedListener
+	}
 	l.tcpListener = tcpListener
 	return tcpListener, err
 }
