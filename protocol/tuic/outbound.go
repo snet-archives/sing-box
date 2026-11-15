@@ -88,6 +88,7 @@ func NewOutbound(ctx context.Context, router adapter.Router, logger log.ContextL
 		UDPStream:         tuicUDPStream,
 		ZeroRTTHandshake:  options.ZeroRTTHandshake,
 		Heartbeat:         time.Duration(options.Heartbeat),
+		ChromeParrot:      !options.DisableChromeParrot,
 	})
 	if err != nil {
 		return nil, err

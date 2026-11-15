@@ -201,9 +201,10 @@ require (
 )
 
 replace (
-	github.com/metacubex/utls => github.com/snet-archives/utls v1.9.0-alpha.1.0.20261114140116-49b02415f7dd
+	github.com/metacubex/utls => github.com/snet-archives/utls v1.9.0-alpha.1.0.20261115171923-7f54a4b73457
+	github.com/sagernet/quic-go => github.com/snet-archives/quic-go v0.61.0-sing-box-mod.13.0.20261115171923-4527689667a0
 	github.com/sagernet/sing-mux => github.com/snet-archives/sing-mux v0.3.10-0.20261114144106-de5b64f77bd8
-	github.com/sagernet/sing-quic => github.com/snet-archives/sing-quic v0.7.2-0.20261114125649-32cc8fd0d5eb
+	github.com/sagernet/sing-quic => github.com/snet-archives/sing-quic v0.7.2-0.20261115171923-f1635b21e59b
 	github.com/sagernet/sing-shadowtls => github.com/snet-archives/sing-shadowtls v0.2.2-0.20261114140338-f393e81c2b7b
 	github.com/sagernet/sing-vmess => github.com/snet-archives/sing-vmess v0.2.9-0.20261114142311-09dba9b129ff
 	golang.org/x/net => github.com/snet-archives/net v0.57.1-0.20261115053044-4374db8db2b6

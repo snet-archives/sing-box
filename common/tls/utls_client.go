@@ -169,7 +169,10 @@ func (c *UTLSClientConfig) UTLSFingerprint() (string, string, bool) {
 	return id.Client, id.Version, true
 }
 
-func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
+func (c *UTLSClientConfig) wrapConn(ctx context.Context, conn net.Conn) (net.Conn, error) {
+	if ctx == nil {
+		ctx = c.ctx
+	}
 	conn = tlsFragmentOptions{
 		enabled:       c.fragment,
 		record:        c.recordFragment,
@@ -178,8 +181,12 @@ func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
 		maxLen:        c.fragmentMaxLen,
 		minWait:       c.fragmentMinWait,
 		maxWait:       c.fragmentMaxWait,
-	}.wrap(c.ctx, conn)
-	conn, err := applyTLSSpoof(conn, c.spoof, c.spoofMethod)
+	}.wrap(ctx, conn)
+	return applyTLSSpoof(conn, c.spoof, c.spoofMethod)
+}
+
+func (c *UTLSClientConfig) Client(conn net.Conn) (Conn, error) {
+	conn, err := c.wrapConn(c.ctx, conn)
 	if err != nil {
 		return nil, err
 	}

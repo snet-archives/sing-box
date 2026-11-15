@@ -16,9 +16,11 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sagernet/sing-box/common/browserhdr"
+	N "github.com/sagernet/sing/common/network"
 )
 
 const (
@@ -272,7 +274,11 @@ func (c *Client) clientHTTPUpgrade(conn net.Conn) (net.Conn, error) {
 		resp.Header.Get("Sec-WebSocket-Accept") != computeWebSocketAccept(wsKey) {
 		return nil, ErrInvalidHandshake
 	}
-	return wrapBufferedConn(conn, br)
+	wrapped, err := wrapBufferedConn(conn, br)
+	if err != nil {
+		return nil, err
+	}
+	return newWSFrameConn(wrapped, true), nil
 }
 
 func (s *Server) serverHTTPUpgrade(ctx context.Context, conn net.Conn) (net.Conn, error) {
@@ -328,5 +334,234 @@ func (s *Server) serverHTTPUpgrade(ctx context.Context, conn net.Conn) (net.Conn
 	if _, err = io.WriteString(conn, respHeader); err != nil {
 		return nil, err
 	}
-	return wrapBufferedConn(conn, br)
+	wrapped, err := wrapBufferedConn(conn, br)
+	if err != nil {
+		return nil, err
+	}
+	return newWSFrameConn(wrapped, false), nil
+}
+
+const (
+	wsFinBit         = 0x80
+	wsMaskBit        = 0x80
+	wsOpcodeBinary   = 0x02
+	wsOpcodeClose    = 0x08
+	wsOpcodePing     = 0x09
+	wsOpcodePong     = 0x0a
+	wsMaxWriteChunk  = 65535
+	wsMaxReadPayload = 16 << 20
+)
+
+// wsFrameConn wraps post-101 XorHTTP traffic in valid RFC 6455 binary frames
+// (FIN=1, opcode=2; client->server MASK=1, server->client MASK=0) so middleboxes
+// inspecting HTTP Upgrade + WebSocket streams see standards-compliant framing.
+type wsFrameConn struct {
+	net.Conn
+	isClient bool
+
+	readMu      sync.Mutex
+	readRem     uint64
+	readMasked  bool
+	readMask    [4]byte
+	readMaskOff int
+	readEOF     bool
+
+	writeMu  sync.Mutex
+	writeBuf []byte
+}
+
+func newWSFrameConn(conn net.Conn, isClient bool) net.Conn {
+	return &wsFrameConn{
+		Conn:     conn,
+		isClient: isClient,
+	}
+}
+
+func (c *wsFrameConn) Upstream() any {
+	return c.Conn
+}
+
+func (c *wsFrameConn) CloseWrite() error {
+	return N.CloseWrite(c.Conn)
+}
+
+func (c *wsFrameConn) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	c.readMu.Lock()
+	defer c.readMu.Unlock()
+
+	for c.readRem == 0 {
+		if c.readEOF {
+			return 0, io.EOF
+		}
+		var hdr [2]byte
+		if _, err := io.ReadFull(c.Conn, hdr[:]); err != nil {
+			return 0, err
+		}
+		if hdr[0]&0x70 != 0 {
+			return 0, ErrInvalidHandshake
+		}
+		fin := hdr[0]&wsFinBit != 0
+		opcode := hdr[0] & 0x0f
+		masked := hdr[1]&wsMaskBit != 0
+		if c.isClient && masked {
+			return 0, ErrInvalidHandshake
+		}
+		if !c.isClient && !masked {
+			return 0, ErrInvalidHandshake
+		}
+
+		var payloadLen uint64
+		switch length7 := hdr[1] & 0x7f; length7 {
+		case 126:
+			var ext [2]byte
+			if _, err := io.ReadFull(c.Conn, ext[:]); err != nil {
+				return 0, err
+			}
+			payloadLen = uint64(binary.BigEndian.Uint16(ext[:]))
+		case 127:
+			var ext [8]byte
+			if _, err := io.ReadFull(c.Conn, ext[:]); err != nil {
+				return 0, err
+			}
+			if ext[0]&0x80 != 0 {
+				return 0, ErrInvalidHandshake
+			}
+			payloadLen = binary.BigEndian.Uint64(ext[:])
+		default:
+			payloadLen = uint64(length7)
+		}
+		if payloadLen > wsMaxReadPayload {
+			return 0, ErrInvalidHandshake
+		}
+
+		var maskKey [4]byte
+		if masked {
+			if _, err := io.ReadFull(c.Conn, maskKey[:]); err != nil {
+				return 0, err
+			}
+		}
+
+		switch opcode {
+		case 0x00, 0x01, wsOpcodeBinary:
+			if payloadLen == 0 {
+				continue
+			}
+			c.readRem = payloadLen
+			c.readMasked = masked
+			c.readMask = maskKey
+			c.readMaskOff = 0
+		case wsOpcodeClose, wsOpcodePing, wsOpcodePong:
+			if !fin || payloadLen > 125 {
+				return 0, ErrInvalidHandshake
+			}
+			if payloadLen > 0 {
+				var ctrlBuf [125]byte
+				if _, err := io.ReadFull(c.Conn, ctrlBuf[:payloadLen]); err != nil {
+					return 0, err
+				}
+			}
+			if opcode == wsOpcodeClose {
+				c.readEOF = true
+				return 0, io.EOF
+			}
+		default:
+			return 0, ErrInvalidHandshake
+		}
+	}
+
+	toRead := len(p)
+	if uint64(toRead) > c.readRem {
+		toRead = int(c.readRem)
+	}
+	n, err := c.Conn.Read(p[:toRead])
+	if n > 0 {
+		if c.readMasked {
+			maskOff := c.readMaskOff
+			for i := 0; i < n; i++ {
+				p[i] ^= c.readMask[(maskOff+i)&3]
+			}
+			c.readMaskOff = (maskOff + n) & 3
+		}
+		c.readRem -= uint64(n)
+	}
+	return n, err
+}
+
+func (c *wsFrameConn) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	written := 0
+	for len(p) > 0 {
+		chunkLen := len(p)
+		if chunkLen > wsMaxWriteChunk {
+			chunkLen = wsMaxWriteChunk
+		}
+		chunk := p[:chunkLen]
+
+		hdrLen := 2
+		if chunkLen >= 126 {
+			hdrLen = 4
+		}
+		if c.isClient {
+			hdrLen += 4
+		}
+		totalLen := hdrLen + chunkLen
+		if cap(c.writeBuf) < totalLen {
+			c.writeBuf = make([]byte, totalLen)
+		} else {
+			c.writeBuf = c.writeBuf[:totalLen]
+		}
+
+		c.writeBuf[0] = wsFinBit | wsOpcodeBinary
+		lengthByte := byte(chunkLen)
+		if chunkLen >= 126 {
+			lengthByte = 126
+			binary.BigEndian.PutUint16(c.writeBuf[2:4], uint16(chunkLen))
+		}
+		if c.isClient {
+			c.writeBuf[1] = wsMaskBit | lengthByte
+			maskSlice := c.writeBuf[hdrLen-4 : hdrLen]
+			if _, err := io.ReadFull(rand.Reader, maskSlice); err != nil {
+				return written, err
+			}
+			dst := c.writeBuf[hdrLen:]
+			m0, m1, m2, m3 := maskSlice[0], maskSlice[1], maskSlice[2], maskSlice[3]
+			for i := 0; i < chunkLen; i++ {
+				var mk byte
+				switch i & 3 {
+				case 0:
+					mk = m0
+				case 1:
+					mk = m1
+				case 2:
+					mk = m2
+				default:
+					mk = m3
+				}
+				dst[i] = chunk[i] ^ mk
+			}
+		} else {
+			c.writeBuf[1] = lengthByte
+			copy(c.writeBuf[hdrLen:], chunk)
+		}
+
+		out := c.writeBuf
+		for len(out) > 0 {
+			n, err := c.Conn.Write(out)
+			out = out[n:]
+			if err != nil {
+				return written, err
+			}
+		}
+		written += chunkLen
+		p = p[chunkLen:]
+	}
+	return written, nil
 }

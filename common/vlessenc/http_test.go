@@ -4,6 +4,7 @@ import (
 	std_bufio "bufio"
 	"bytes"
 	"context"
+	"encoding/binary"
 	"errors"
 	"io"
 	"net"
@@ -392,4 +393,143 @@ func TestXorHTTPFallbackAndReplayRejection(t *testing.T) {
 		// Replaying the exact captured HTTP Upgrade request must NOT get 101; it must fall back.
 		assertFallbackExactBytes(t, capturedUpgrade)
 	})
+}
+
+func assertValidRFC6455Stream(t *testing.T, stream []byte, expectMasked bool) {
+	t.Helper()
+	require.NotEmpty(t, stream, "expected non-empty post-101 WebSocket stream")
+	pos := 0
+	frames := 0
+	for pos < len(stream) {
+		require.GreaterOrEqual(t, len(stream)-pos, 2, "truncated RFC 6455 frame header at %d", pos)
+		b0, b1 := stream[pos], stream[pos+1]
+		pos += 2
+		require.Equal(t, byte(wsFinBit|wsOpcodeBinary), b0, "frame %d must have FIN=1 RSV=0 opcode=2, got 0x%02x", frames, b0)
+		masked := b1&wsMaskBit != 0
+		require.Equal(t, expectMasked, masked, "frame %d mask bit mismatch", frames)
+		var payloadLen uint64
+		switch l := b1 & 0x7f; l {
+		case 126:
+			require.GreaterOrEqual(t, len(stream)-pos, 2)
+			payloadLen = uint64(binary.BigEndian.Uint16(stream[pos : pos+2]))
+			pos += 2
+		case 127:
+			require.GreaterOrEqual(t, len(stream)-pos, 8)
+			payloadLen = binary.BigEndian.Uint64(stream[pos : pos+8])
+			pos += 8
+		default:
+			payloadLen = uint64(l)
+		}
+		if masked {
+			require.GreaterOrEqual(t, len(stream)-pos, 4)
+			pos += 4
+		}
+		require.GreaterOrEqual(t, uint64(len(stream)-pos), payloadLen, "truncated RFC 6455 frame %d payload", frames)
+		pos += int(payloadLen)
+		frames++
+	}
+	require.Greater(t, frames, 0)
+}
+
+func TestXorHTTPPost101WireUsesValidRFC6455Frames(t *testing.T) {
+	t.Parallel()
+
+	kp, err := GenerateKeyPair()
+	require.NoError(t, err)
+	srv, err := NewServer(option.VLESSDecryptionOptions{
+		Enabled:      true,
+		PrivateKey:   kp.PrivateKey,
+		MLKEM768Seed: kp.MLKEM768Seed,
+		TicketSecret: kp.TicketSecret,
+		XorMode:      XorHTTP,
+		XorPSK:       kp.XorPSK,
+		HTTPHost:     "cdn.example.com",
+		HTTPPath:     "/ws",
+	})
+	require.NoError(t, err)
+	cli, err := NewClient(option.VLESSEncryptionOptions{
+		Enabled:          true,
+		PublicKey:        kp.PublicKey,
+		MLKEM768EncapKey: kp.MLKEM768EncapKey,
+		Mode:             ModeNative,
+		XorMode:          XorHTTP,
+		XorPSK:           kp.XorPSK,
+		HTTPHost:         "cdn.example.com",
+		HTTPPath:         "/ws",
+	})
+	require.NoError(t, err)
+
+	rawCli, rawSrv := tcpPair(t)
+	var mu sync.Mutex
+	var c2sWire, s2cWire []byte
+	recCli := &wireRecorderConn{Conn: rawCli, onWrite: func(p []byte) {
+		mu.Lock()
+		c2sWire = append(c2sWire, p...)
+		mu.Unlock()
+	}, onRead: func(p []byte) {
+		mu.Lock()
+		s2cWire = append(s2cWire, p...)
+		mu.Unlock()
+	}}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		sConn, sErr := srv.ServerHandshake(ctx, rawSrv)
+		if sErr != nil {
+			_ = rawSrv.Close()
+			errCh <- sErr
+			return
+		}
+		defer sConn.Close()
+		_, copyErr := io.Copy(sConn, sConn)
+		errCh <- copyErr
+	}()
+
+	cConn, err := cli.ClientHandshake(ctx, recCli)
+	require.NoError(t, err)
+	payload := bytes.Repeat([]byte("RFC6455-CHECK-"), 200)
+	_, err = cConn.Write(payload)
+	require.NoError(t, err)
+	got := make([]byte, len(payload))
+	_, err = io.ReadFull(cConn, got)
+	require.NoError(t, err)
+	require.Equal(t, payload, got)
+	require.NoError(t, cConn.Close())
+	require.NoError(t, <-errCh)
+
+	mu.Lock()
+	c2sCopy := bytes.Clone(c2sWire)
+	s2cCopy := bytes.Clone(s2cWire)
+	mu.Unlock()
+
+	c2sEnd := bytes.Index(c2sCopy, []byte("\r\n\r\n"))
+	require.Greater(t, c2sEnd, 0)
+	s2cEnd := bytes.Index(s2cCopy, []byte("\r\n\r\n"))
+	require.Greater(t, s2cEnd, 0)
+
+	assertValidRFC6455Stream(t, c2sCopy[c2sEnd+4:], true)
+	assertValidRFC6455Stream(t, s2cCopy[s2cEnd+4:], false)
+}
+
+type wireRecorderConn struct {
+	net.Conn
+	onWrite func([]byte)
+	onRead  func([]byte)
+}
+
+func (c *wireRecorderConn) Read(p []byte) (int, error) {
+	n, err := c.Conn.Read(p)
+	if n > 0 && c.onRead != nil {
+		c.onRead(p[:n])
+	}
+	return n, err
+}
+
+func (c *wireRecorderConn) Write(p []byte) (int, error) {
+	if len(p) > 0 && c.onWrite != nil {
+		c.onWrite(p)
+	}
+	return c.Conn.Write(p)
 }
