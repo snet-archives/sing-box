@@ -521,7 +521,34 @@ func NewSTDServer(ctx context.Context, logger log.ContextLogger, options option.
 	serverConfig.config.GetConfigForClient = func(info *tls.ClientHelloInfo) (*tls.Config, error) {
 		serverConfig.access.RLock()
 		defer serverConfig.access.RUnlock()
-		return serverConfig.config, nil
+		config := serverConfig.config
+		if options.StrictSNI && !(info != nil && len(info.SupportedProtos) == 1 && info.SupportedProtos[0] == C.ACMETLS1Protocol) {
+			if info == nil || info.ServerName == "" {
+				return nil, E.New("tls: missing server name")
+			}
+			if config.ServerName != "" {
+				if !strings.EqualFold(info.ServerName, config.ServerName) {
+					return nil, E.New("tls: unrecognized server name: ", info.ServerName)
+				}
+			} else if len(config.Certificates) > 0 {
+				var matched bool
+				for i := range config.Certificates {
+					cert := &config.Certificates[i]
+					leaf := cert.Leaf
+					if leaf == nil && len(cert.Certificate) > 0 {
+						leaf, _ = x509.ParseCertificate(cert.Certificate[0])
+					}
+					if leaf != nil && leaf.VerifyHostname(info.ServerName) == nil {
+						matched = true
+						break
+					}
+				}
+				if !matched {
+					return nil, E.New("tls: unrecognized server name: ", info.ServerName)
+				}
+			}
+		}
+		return config, nil
 	}
 	var config ServerConfig = serverConfig
 	if options.KernelTx || options.KernelRx {

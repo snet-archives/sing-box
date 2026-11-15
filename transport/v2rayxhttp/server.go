@@ -187,7 +187,7 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	// Stream-one: single POST without session ID.
 	if meta.sessionID == "" {
 		if request.Method != http.MethodPost {
-			s.invalidRequest(writer, request, http.StatusMethodNotAllowed, E.New("xhttp unexpected method without session: ", request.Method))
+			s.invalidRequest(writer, request, http.StatusNotFound, E.New("xhttp unexpected method without session: ", request.Method))
 			return
 		}
 		s.serveStreamOne(writer, request)
@@ -200,7 +200,7 @@ func (s *Server) ServeHTTP(writer http.ResponseWriter, request *http.Request) {
 	case http.MethodPost, http.MethodPut:
 		s.serveUplinkPost(writer, request, meta)
 	default:
-		s.invalidRequest(writer, request, http.StatusMethodNotAllowed, E.New("xhttp unsupported method: ", request.Method))
+		s.invalidRequest(writer, request, http.StatusNotFound, E.New("xhttp unsupported method: ", request.Method))
 	}
 }
 

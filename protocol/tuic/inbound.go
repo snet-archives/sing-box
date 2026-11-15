@@ -7,6 +7,7 @@ import (
 
 	"github.com/sagernet/sing-box/adapter"
 	"github.com/sagernet/sing-box/adapter/inbound"
+	"github.com/sagernet/sing-box/common/httpmasquerade"
 	"github.com/sagernet/sing-box/common/listener"
 	"github.com/sagernet/sing-box/common/tls"
 	"github.com/sagernet/sing-box/common/uot"
@@ -63,6 +64,10 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 	} else {
 		udpTimeout = C.UDPTimeout
 	}
+	masqueradeHandler, err := httpmasquerade.BuildHandler(ctx, options.Masquerade)
+	if err != nil {
+		return nil, err
+	}
 	service, err := tuic.NewService[int](tuic.ServiceOptions{
 		Context:   ctx,
 		Logger:    logger,
@@ -82,6 +87,7 @@ func NewInbound(ctx context.Context, router adapter.Router, logger log.ContextLo
 		Heartbeat:         time.Duration(options.Heartbeat),
 		UDPTimeout:        udpTimeout,
 		Handler:           inbound,
+		MasqueradeHandler: masqueradeHandler,
 	})
 	if err != nil {
 		return nil, err

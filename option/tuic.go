@@ -11,6 +11,7 @@ type TUICInboundOptions struct {
 	Heartbeat         badoption.Duration `json:"heartbeat,omitempty"`
 	InboundTLSOptionsContainer
 	QUICOptions
+	Masquerade *Hysteria2Masquerade `json:"masquerade,omitempty"`
 }
 
 type TUICUser struct {
