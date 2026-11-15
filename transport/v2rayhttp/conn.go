@@ -3,6 +3,7 @@ package v2rayhttp
 import (
 	std_bufio "bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -167,12 +168,22 @@ func (c *HTTP2Conn) Read(b []byte) (n int, err error) {
 		}
 	}
 	n, err = c.reader.Read(b)
+	if err != nil && (errors.Is(err, http.ErrBodyReadAfterClose) || baderror.Contains(err, "request body closed", "H3_REQUEST_CANCELLED (local)")) {
+		return n, net.ErrClosed
+	}
 	return n, baderror.WrapH2(err)
 }
 
 func (c *HTTP2Conn) Write(b []byte) (n int, err error) {
 	n, err = c.writer.Write(b)
 	return n, baderror.WrapH2(err)
+}
+
+func (c *HTTP2Conn) CloseWrite() error {
+	if closer, isCloser := c.writer.(io.Closer); isCloser {
+		return closer.Close()
+	}
+	return c.Close()
 }
 
 func (c *HTTP2Conn) Close() error {

@@ -1390,10 +1390,7 @@ func (c *splitClientConn) sendPacketChunk(seq uint64, chunk []byte, eof bool) er
 			if c.client.cfg.uplinkDataPlacement != placementBody {
 				nonBody = chunk
 			}
-			getBody = func() (io.ReadCloser, error) {
-				return http.NoBody, nil
-			}
-			bodyReader = http.NoBody
+			bodyReader = nil
 		}
 		seqCopy := seq
 		req := c.client.cfg.buildRequest(c.client.baseURL, http.MethodPost, c.upHost, c.client.headers, c.sessionID, &seqCopy, nonBody)
@@ -1461,7 +1458,7 @@ func (c *splitClientConn) runStreamUpLoop() {
 
 		var reader *streamUpBodyReader
 		if emptyEOF {
-			req.Body = http.NoBody
+			req.Body = nil
 			req.ContentLength = 0
 		} else {
 			rotateAfter := time.Duration(samplePaddingLen(c.client.cfg.streamUpServerSecs)) * time.Second

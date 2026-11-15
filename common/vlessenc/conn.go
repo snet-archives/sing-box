@@ -191,7 +191,15 @@ func (c *aeadConn) Close() error {
 }
 
 func (c *aeadConn) CloseWrite() error {
-	return N.CloseWrite(c.conn)
+	return closeWriteOrClose(c.conn)
+}
+
+func closeWriteOrClose(conn net.Conn) error {
+	writer, _ := N.UnwrapCountWriter(conn, nil)
+	if writeCloser, isWriteCloser := N.UnwrapWriter(writer).(N.WriteCloser); isWriteCloser {
+		return writeCloser.CloseWrite()
+	}
+	return conn.Close()
 }
 
 func (c *aeadConn) LocalAddr() net.Addr                { return c.conn.LocalAddr() }

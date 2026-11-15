@@ -349,7 +349,9 @@ func (s *Server) serveResumableDownlinkGet(writer http.ResponseWriter, request *
 		sess.dlAttached.Store(false)
 		sess.dlBuf = nil
 		sess.dlMu.Unlock()
-		s.removeSession(sess)
+		if !sess.finishedAt().IsZero() {
+			s.removeSession(sess)
+		}
 		s.writeCommonResponseHeaders(writer, request, false)
 		writer.Header().Set(headerStreamEnd, "1")
 		writer.WriteHeader(http.StatusOK)
@@ -443,22 +445,26 @@ func (s *Server) serveResumableDownlinkGet(writer http.ResponseWriter, request *
 	select {
 	case <-stopCh:
 		sess.dlMu.Lock()
-		if sess.dlGeneration == gen && sess.dlEOF {
-			for sess.dlGeneration == gen && sess.dlSentOffset < sess.dlTotalBytes {
-				start := int(sess.dlSentOffset - sess.dlBaseOffset)
-				chunk := sess.dlBuf[start:]
-				if _, err := writer.Write(chunk); err != nil {
-					break
+		if sess.dlGeneration == gen {
+			if sess.dlEOF {
+				for sess.dlSentOffset < sess.dlTotalBytes {
+					start := int(sess.dlSentOffset - sess.dlBaseOffset)
+					chunk := sess.dlBuf[start:]
+					if _, err := writer.Write(chunk); err != nil {
+						break
+					}
+					sess.dlSentOffset = sess.dlTotalBytes
 				}
-				sess.dlSentOffset = sess.dlTotalBytes
+				if !alreadyEOF {
+					writer.Header().Set(headerStreamEnd, "1")
+				}
+				if sess.dlWriter == writer {
+					sess.dlWriter = nil
+					sess.dlFlusher = nil
+				}
 			}
-			if !alreadyEOF {
-				writer.Header().Set(headerStreamEnd, "1")
-			}
-			if sess.dlWriter == writer {
-				sess.dlWriter = nil
-				sess.dlFlusher = nil
-			}
+			sess.dlAttached.Store(false)
+			sess.dlCond.Broadcast()
 		}
 		sess.dlMu.Unlock()
 		flusher.Flush()
@@ -952,6 +958,23 @@ func (s *serverSession) Close() error {
 			s.server.removeSession(s)
 		}
 	})
+	return nil
+}
+
+func (s *serverSession) CloseWrite() error {
+	s.lastActive.Store(time.Now().UnixNano())
+	s.dlMu.Lock()
+	if !s.dlResumable {
+		s.dlMu.Unlock()
+		return s.Close()
+	}
+	s.dlEOF = true
+	if s.dlActiveStop != nil {
+		close(s.dlActiveStop)
+		s.dlActiveStop = nil
+	}
+	s.dlCond.Broadcast()
+	s.dlMu.Unlock()
 	return nil
 }
 

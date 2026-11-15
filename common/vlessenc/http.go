@@ -20,7 +20,6 @@ import (
 	"time"
 
 	"github.com/sagernet/sing-box/common/browserhdr"
-	N "github.com/sagernet/sing/common/network"
 )
 
 const (
@@ -382,7 +381,7 @@ func (c *wsFrameConn) Upstream() any {
 }
 
 func (c *wsFrameConn) CloseWrite() error {
-	return N.CloseWrite(c.Conn)
+	return closeWriteOrClose(c.Conn)
 }
 
 func (c *wsFrameConn) Read(p []byte) (int, error) {
